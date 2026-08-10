@@ -1,0 +1,55 @@
+{
+  "version": 1,
+  "caddyAdminUrl": "http://127.0.0.1:2019/config/",
+  "dashboard": {
+    "name": "Localdeck",
+    "host": "apps.localhost",
+    "bind": "127.0.0.1",
+    "port": 4545
+  },
+  "apps": [
+    {
+      "id": "symphony",
+      "name": "Symphony",
+      "description": "Linear と Codex をつなぐローカル・オーケストレーター",
+      "host": "symphony.localhost",
+      "upstream": "127.0.0.1:14000",
+      "directory": "/Users/wim/program/openai-symphony/elixir",
+      "requiredEnvironment": ["LINEAR_API_KEY"],
+      "lifecycle": {
+        "strategy": "process",
+        "start": [
+          "/opt/homebrew/opt/mise/bin/mise",
+          "exec",
+          "--",
+          "./bin/symphony",
+          "/Users/wim/program/ghq/github.com/wim-web/orchestrony/config/symphony/WORKFLOW.md",
+          "--port",
+          "14000",
+          "--i-understand-that-this-will-be-running-without-the-usual-guardrails"
+        ],
+        "logFile": "/Users/wim/program/openai-symphony/elixir/log/localdeck.log",
+        "startTimeoutMs": 30000,
+        "stopTimeoutMs": 15000
+      }
+    },
+    {
+      "id": "ai-ultra",
+      "name": "AI Ultra Research",
+      "description": "AI 業界の日次調査を蓄積・検索・評価するローカルアーカイブ",
+      "host": "ai-ultra.localhost",
+      "upstream": "127.0.0.1:8765",
+      "directory": "/Users/wim/program/ghq/github.com/wim-web/ai-ultra-research",
+      "proxy": {
+        "headerUpHost": "localhost"
+      },
+      "lifecycle": {
+        "strategy": "commands",
+        "start": ["bin/web", "start"],
+        "restart": ["bin/web", "restart"],
+        "stop": ["bin/web", "stop"],
+        "timeoutMs": 120000
+      }
+    }
+  ]
+}

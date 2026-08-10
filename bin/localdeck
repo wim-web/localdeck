@@ -1,0 +1,459 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+project_root=$(CDPATH= cd -- "$script_dir/.." && pwd)
+dashboard_pid_file="$project_root/state/localdeck.pid"
+caddy_pid_file="$project_root/state/caddy.pid"
+dashboard_log_file="$project_root/logs/localdeck.log"
+caddy_log_file="$project_root/logs/caddy.log"
+health_url="http://127.0.0.1:4545/api/health"
+sync_url="http://127.0.0.1:4545/api/caddy/sync"
+caddy_url="http://127.0.0.1:2019/config/"
+server_file="$project_root/server/index.mjs"
+caddy_service_label="com.wim.localdeck.caddy"
+caddy_service_source="$project_root/launchd/$caddy_service_label.plist"
+caddy_service_file="$HOME/Library/LaunchAgents/$caddy_service_label.plist"
+caddy_service_target="gui/$(id -u)/$caddy_service_label"
+caddy_started_here=0
+
+usage() {
+  cat <<EOF
+Usage: bin/localdeck [start|restart|stop|status|serve]
+
+  start    Caddyと管理画面をbuildしてバックグラウンド起動
+  restart  CaddyとLocaldeckを再起動
+  stop     Localdeckが管理するCaddyと管理画面を停止
+  status   CaddyとLocaldeckの状態を表示
+  serve    Caddyを起動し、管理画面をフォアグラウンド起動
+EOF
+}
+
+dashboard_healthy() {
+  curl -fsS --connect-timeout 1 --max-time 2 "$health_url" >/dev/null 2>&1
+}
+
+caddy_healthy() {
+  curl -fsS --connect-timeout 1 --max-time 2 "$caddy_url" >/dev/null 2>&1
+}
+
+caddy_service_loaded() {
+  command -v launchctl >/dev/null 2>&1 && \
+    launchctl print "$caddy_service_target" >/dev/null 2>&1
+}
+
+install_caddy_service() {
+  [ -f "$caddy_service_source" ] || return 1
+  mkdir -p "$(dirname "$caddy_service_file")"
+  if [ ! -f "$caddy_service_file" ] || ! cmp -s "$caddy_service_source" "$caddy_service_file"; then
+    cp "$caddy_service_source" "$caddy_service_file"
+  fi
+}
+
+read_pid_file() {
+  target_pid_file=$1
+  [ -f "$target_pid_file" ] || return 1
+  recorded_pid=$(sed -n '1p' "$target_pid_file")
+  case "$recorded_pid" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
+  [ "$recorded_pid" -gt 1 ] || return 1
+  printf '%s\n' "$recorded_pid"
+}
+
+process_running() {
+  lsof -p "$1" >/dev/null 2>&1
+}
+
+process_cwd() {
+  lsof -a -p "$1" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p'
+}
+
+process_is_localdeck() {
+  [ "$(process_cwd "$1")" = "$project_root" ] && \
+    lsof -a -p "$1" -iTCP:4545 -sTCP:LISTEN >/dev/null 2>&1
+}
+
+process_is_caddy() {
+  [ "$(process_cwd "$1")" = "$project_root" ] && \
+    lsof -a -p "$1" -iTCP:2019 -sTCP:LISTEN >/dev/null 2>&1
+}
+
+write_pid_file() {
+  target_pid_file=$1
+  target_pid=$2
+  temporary_pid_file="$target_pid_file.tmp.$$"
+  printf '%s\n' "$target_pid" >"$temporary_pid_file"
+  mv "$temporary_pid_file" "$target_pid_file"
+}
+
+build_dashboard() {
+  (cd "$project_root" && npm run build:local)
+}
+
+start_caddy() {
+  mkdir -p "$project_root/state" "$project_root/logs"
+  caddy_started_here=0
+
+  if [ -f "$caddy_pid_file" ]; then
+    if ! managed_pid=$(read_pid_file "$caddy_pid_file"); then
+      echo "error: invalid Caddy PID file: $caddy_pid_file" >&2
+      return 1
+    fi
+    if process_running "$managed_pid"; then
+      if ! process_is_caddy "$managed_pid"; then
+        echo "error: PID $managed_pid is not the Localdeck-managed Caddy; refusing to replace it" >&2
+        return 1
+      fi
+      if caddy_healthy; then
+        echo "Caddy is already running (PID $managed_pid)"
+        return 0
+      fi
+      echo "error: Caddy process $managed_pid is running but its Admin API is unavailable" >&2
+      return 1
+    fi
+    rm -f "$caddy_pid_file"
+  fi
+
+  if caddy_healthy; then
+    echo "error: Caddy is already running outside Localdeck management" >&2
+    echo "Stop the old Caddy once, then run this command again." >&2
+    return 1
+  fi
+
+  if ! caddy_bin=$(command -v caddy); then
+    echo "error: caddy command was not found" >&2
+    return 1
+  fi
+
+  if command -v launchctl >/dev/null 2>&1 && install_caddy_service; then
+    if caddy_service_loaded; then
+      launchctl kickstart "$caddy_service_target"
+    else
+      launchctl bootstrap "gui/$(id -u)" "$caddy_service_file"
+    fi
+
+    attempts=0
+    while [ "$attempts" -lt 40 ]; do
+      if caddy_healthy && managed_pid=$(read_pid_file "$caddy_pid_file" 2>/dev/null) && \
+        process_running "$managed_pid" && process_is_caddy "$managed_pid"; then
+        caddy_started_here=1
+        echo "Caddy started by launchd (PID $managed_pid)"
+        echo "Log: $caddy_log_file"
+        return 0
+      fi
+      attempts=$((attempts + 1))
+      sleep 0.25
+    done
+    launchctl bootout "$caddy_service_target" >/dev/null 2>&1 || true
+    rm -f "$caddy_pid_file"
+    echo "error: launchd-managed Caddy did not become ready within 10 seconds" >&2
+    return 1
+  fi
+
+  printf '\n[%s] starting Caddy\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" >>"$caddy_log_file"
+  (
+    cd "$project_root"
+    exec nohup "$caddy_bin" run
+  ) </dev/null >>"$caddy_log_file" 2>&1 &
+  caddy_pid=$!
+  write_pid_file "$caddy_pid_file" "$caddy_pid"
+
+  attempts=0
+  while [ "$attempts" -lt 40 ]; do
+    if caddy_healthy; then
+      caddy_started_here=1
+      echo "Caddy started (PID $caddy_pid)"
+      echo "Log: $caddy_log_file"
+      return 0
+    fi
+    if ! process_running "$caddy_pid"; then
+      wait "$caddy_pid" 2>/dev/null || true
+      rm -f "$caddy_pid_file"
+      echo "error: Caddy failed to start" >&2
+      tail -n 20 "$caddy_log_file" >&2 || true
+      return 1
+    fi
+    attempts=$((attempts + 1))
+    sleep 0.25
+  done
+
+  kill "$caddy_pid" >/dev/null 2>&1 || true
+  wait "$caddy_pid" 2>/dev/null || true
+  rm -f "$caddy_pid_file"
+  echo "error: Caddy Admin API did not become ready within 10 seconds" >&2
+  return 1
+}
+
+start_dashboard() {
+  mkdir -p "$project_root/state" "$project_root/logs"
+
+  if [ -f "$dashboard_pid_file" ]; then
+    if ! managed_pid=$(read_pid_file "$dashboard_pid_file"); then
+      echo "error: invalid PID file: $dashboard_pid_file" >&2
+      return 1
+    fi
+    if process_running "$managed_pid"; then
+      if ! process_is_localdeck "$managed_pid"; then
+        echo "error: PID $managed_pid is not Localdeck; refusing to replace it" >&2
+        return 1
+      fi
+      if dashboard_healthy; then
+        echo "Localdeck is already running (PID $managed_pid)"
+        return 0
+      fi
+      echo "error: Localdeck process $managed_pid is running but not responding" >&2
+      return 1
+    fi
+    rm -f "$dashboard_pid_file"
+  fi
+
+  if dashboard_healthy; then
+    echo "error: port 4545 is already serving another Localdeck-compatible process" >&2
+    return 1
+  fi
+
+  build_dashboard
+  node_bin=$(command -v node)
+  printf '\n[%s] starting Localdeck\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" >>"$dashboard_log_file"
+  (
+    cd "$project_root"
+    exec nohup "$node_bin" "$server_file"
+  ) </dev/null >>"$dashboard_log_file" 2>&1 &
+  server_pid=$!
+  write_pid_file "$dashboard_pid_file" "$server_pid"
+
+  attempts=0
+  while [ "$attempts" -lt 40 ]; do
+    if dashboard_healthy; then
+      echo "Localdeck started (PID $server_pid)"
+      echo "Log: $dashboard_log_file"
+      return 0
+    fi
+    if ! process_running "$server_pid"; then
+      wait "$server_pid" 2>/dev/null || true
+      rm -f "$dashboard_pid_file"
+      echo "error: Localdeck failed to start" >&2
+      tail -n 20 "$dashboard_log_file" >&2 || true
+      return 1
+    fi
+    attempts=$((attempts + 1))
+    sleep 0.25
+  done
+
+  kill "$server_pid" >/dev/null 2>&1 || true
+  wait "$server_pid" 2>/dev/null || true
+  rm -f "$dashboard_pid_file"
+  echo "error: Localdeck did not become ready within 10 seconds" >&2
+  return 1
+}
+
+sync_routes() {
+  if ! curl -fsS --connect-timeout 2 --max-time 15 \
+    -X POST -H 'X-Localdeck-Action: 1' "$sync_url" >/dev/null; then
+    echo "error: SQLite settings could not be synchronized to Caddy" >&2
+    return 1
+  fi
+  echo "Caddy routes synchronized from SQLite"
+}
+
+stop_dashboard() {
+  if [ ! -f "$dashboard_pid_file" ]; then
+    if dashboard_healthy; then
+      echo "error: Localdeck is running without its managed PID file" >&2
+      return 1
+    fi
+    echo "Localdeck is not running"
+    return 0
+  fi
+
+  if ! managed_pid=$(read_pid_file "$dashboard_pid_file"); then
+    echo "error: invalid PID file: $dashboard_pid_file" >&2
+    return 1
+  fi
+  if ! process_running "$managed_pid"; then
+    rm -f "$dashboard_pid_file"
+    if dashboard_healthy; then
+      echo "error: Localdeck is responding without a managed PID file" >&2
+      return 1
+    fi
+    echo "Localdeck is not running; removed stale PID file"
+    return 0
+  fi
+  if ! process_is_localdeck "$managed_pid"; then
+    echo "error: PID $managed_pid is not Localdeck; refusing to stop it" >&2
+    return 1
+  fi
+
+  kill "$managed_pid"
+  attempts=0
+  while process_running "$managed_pid"; do
+    if [ "$attempts" -ge 80 ]; then
+      echo "error: Localdeck did not stop within 20 seconds" >&2
+      return 1
+    fi
+    attempts=$((attempts + 1))
+    sleep 0.25
+  done
+  rm -f "$dashboard_pid_file"
+  echo "Localdeck stopped"
+}
+
+stop_caddy() {
+  if caddy_service_loaded; then
+    if [ -f "$caddy_pid_file" ]; then
+      if ! managed_pid=$(read_pid_file "$caddy_pid_file"); then
+        echo "error: invalid Caddy PID file: $caddy_pid_file" >&2
+        return 1
+      fi
+      if process_running "$managed_pid" && ! process_is_caddy "$managed_pid"; then
+        echo "error: PID $managed_pid is not the Localdeck-managed Caddy; refusing to stop it" >&2
+        return 1
+      fi
+    fi
+    launchctl bootout "$caddy_service_target"
+    attempts=0
+    while caddy_healthy; do
+      if [ "$attempts" -ge 80 ]; then
+        echo "error: launchd-managed Caddy did not stop within 20 seconds" >&2
+        return 1
+      fi
+      attempts=$((attempts + 1))
+      sleep 0.25
+    done
+    rm -f "$caddy_pid_file"
+    echo "Caddy stopped"
+    return 0
+  fi
+
+  if [ ! -f "$caddy_pid_file" ]; then
+    if caddy_healthy; then
+      echo "error: Caddy is running outside Localdeck management; refusing to stop it" >&2
+      return 1
+    fi
+    echo "Caddy is not running"
+    return 0
+  fi
+
+  if ! managed_pid=$(read_pid_file "$caddy_pid_file"); then
+    echo "error: invalid Caddy PID file: $caddy_pid_file" >&2
+    return 1
+  fi
+  if ! process_running "$managed_pid"; then
+    rm -f "$caddy_pid_file"
+    if caddy_healthy; then
+      echo "error: Caddy Admin API is responding without a managed PID file" >&2
+      return 1
+    fi
+    echo "Caddy is not running; removed stale PID file"
+    return 0
+  fi
+  if ! process_is_caddy "$managed_pid"; then
+    echo "error: PID $managed_pid is not the Localdeck-managed Caddy; refusing to stop it" >&2
+    return 1
+  fi
+
+  kill "$managed_pid"
+  attempts=0
+  while process_running "$managed_pid"; do
+    if [ "$attempts" -ge 80 ]; then
+      echo "error: Caddy did not stop within 20 seconds" >&2
+      return 1
+    fi
+    attempts=$((attempts + 1))
+    sleep 0.25
+  done
+  rm -f "$caddy_pid_file"
+  echo "Caddy stopped"
+}
+
+start_all() {
+  start_caddy
+  if ! start_dashboard; then
+    [ "$caddy_started_here" -eq 0 ] || stop_caddy || true
+    return 1
+  fi
+  if ! sync_routes; then
+    return 1
+  fi
+  echo "https://apps.localhost"
+}
+
+stop_all() {
+  result=0
+  stop_dashboard || result=$?
+  stop_caddy || result=$?
+  return "$result"
+}
+
+status_dashboard() {
+  if dashboard_healthy; then
+    if managed_pid=$(read_pid_file "$dashboard_pid_file" 2>/dev/null) && \
+      process_running "$managed_pid" && process_is_localdeck "$managed_pid"; then
+      echo "Localdeck is running (PID $managed_pid)"
+    else
+      echo "Localdeck is responding outside managed PID state"
+      return 1
+    fi
+    return 0
+  fi
+  echo "Localdeck is stopped"
+  return 1
+}
+
+status_caddy() {
+  if caddy_healthy; then
+    if managed_pid=$(read_pid_file "$caddy_pid_file" 2>/dev/null) && \
+      process_running "$managed_pid" && process_is_caddy "$managed_pid"; then
+      echo "Caddy is running (PID $managed_pid)"
+    else
+      echo "Caddy is running outside Localdeck management"
+      return 1
+    fi
+    return 0
+  fi
+  echo "Caddy is stopped"
+  return 1
+}
+
+status_all() {
+  result=0
+  status_caddy || result=1
+  status_dashboard || result=1
+  [ "$result" -ne 0 ] || echo "https://apps.localhost"
+  return "$result"
+}
+
+serve_all() {
+  start_caddy
+  build_dashboard
+  cd "$project_root"
+  node "$server_file"
+}
+
+command=${1:-start}
+case "$command" in
+  start)
+    start_all
+    ;;
+  restart)
+    stop_all
+    start_all
+    ;;
+  stop)
+    stop_all
+    ;;
+  status)
+    status_all
+    ;;
+  serve)
+    serve_all
+    ;;
+  help|-h|--help)
+    usage
+    ;;
+  *)
+    usage >&2
+    exit 2
+    ;;
+esac
