@@ -1,0 +1,22 @@
+# dependencies and generated output
+/node_modules/
+/dist-local/
+/coverage/
+
+# local runtime state
+/logs/
+/state/
+/apps.config.json
+/launchd/*.plist
+
+# local environment
+.env*
+
+# misc
+.DS_Store
+*.pem
+*.tsbuildinfo
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
