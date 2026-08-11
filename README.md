@@ -16,6 +16,7 @@ npm start
 ```
 
 起動後に <https://apps.localhost> を開きます。Caddy、管理画面、登録済みルートはまとめて起動・同期されます。
+管理画面は起動元とは別セッションで動作するため、起動に使ったターミナルやCodexのタスクを閉じても停止しません。
 
 ```sh
 npm run local:status

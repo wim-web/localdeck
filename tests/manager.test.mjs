@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { promisify } from "node:util";
 
 import {
   executeAction,
@@ -13,6 +15,8 @@ import {
   parseUpstream,
   validateConfig,
 } from "../server/core.mjs";
+
+const execFileAsync = promisify(execFile);
 
 const caddyFixture = {
   apps: {
@@ -159,4 +163,50 @@ test("process 方式は登録ディレクトリのプロセスを起動して安
 
   await executeAction(app, "stop");
   assert.equal((await isPortOpen("127.0.0.1", port)).online, false);
+});
+
+test("Localdeck の起動プロセスを呼び出し元とは別セッションへ切り離す", async (t) => {
+  const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "localdeck-detached-test-"));
+  t.after(() => rm(temporaryDirectory, { recursive: true, force: true }));
+
+  const probe = net.createServer();
+  await new Promise((resolve) => probe.listen(0, "127.0.0.1", resolve));
+  const address = probe.address();
+  assert.ok(address && typeof address === "object");
+  const port = address.port;
+  await new Promise((resolve) => probe.close(resolve));
+
+  const workerFile = path.join(temporaryDirectory, "worker.mjs");
+  const logFile = path.join(temporaryDirectory, "worker.log");
+  await writeFile(
+    workerFile,
+    `import net from "node:net";\nnet.createServer(() => {}).listen(${port}, "127.0.0.1");\n`,
+  );
+
+  const launcherFile = new URL("../server/start-detached.mjs", import.meta.url);
+  const { stdout } = await execFileAsync(process.execPath, [
+    launcherFile.pathname,
+    workerFile,
+    temporaryDirectory,
+    logFile,
+  ]);
+  const pid = Number(stdout.trim());
+  assert.ok(Number.isInteger(pid) && pid > 1);
+
+  t.after(async () => {
+    try {
+      process.kill(pid, "SIGTERM");
+    } catch (error) {
+      if (error?.code !== "ESRCH") throw error;
+    }
+  });
+
+  assert.doesNotThrow(() => process.kill(-pid, 0));
+
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    if ((await isPortOpen("127.0.0.1", port)).online) break;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.equal((await isPortOpen("127.0.0.1", port)).online, true);
 });
