@@ -1,0 +1,43 @@
+{
+  "scanned_at": "2026-08-11",
+  "target": ".",
+  "source_mtimes": {
+    "package.json": 1786333489
+  },
+  "design_system": {
+    "design_md": null,
+    "tokens_css": null
+  },
+  "font_stack": {
+    "body": "Hiragino Sans, Yu Gothic UI, system-ui, sans-serif",
+    "mono": "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+    "external_fonts": false
+  },
+  "palette": {
+    "source": "app/globals.css :root",
+    "format": "hex custom properties with additional inline values",
+    "anchor": "dark green with lime accent"
+  },
+  "motion": {
+    "stance": "motion-cut",
+    "library": null,
+    "existing": "CSS transitions only"
+  },
+  "spacing": {
+    "named_scale": false,
+    "existing": "raw pixel and rem values"
+  },
+  "framework": {
+    "ui": "React 19.2.6",
+    "bundler": "Vite 8.0.13",
+    "entry": "local/client.tsx",
+    "page": "app/page.tsx"
+  },
+  "scope": {
+    "hallmark_mode": "multi-page",
+    "reason": "target is a directory",
+    "page_files": [
+      "app/page.tsx"
+    ]
+  }
+}

@@ -1,0 +1,12 @@
+[
+  {
+    "date": "2026-08-12",
+    "scope": "app",
+    "macrostructure": "Workbench",
+    "theme": "Cobalt",
+    "enrichment": "none",
+    "nav": "N13",
+    "footer": "Ft2",
+    "brief": "Localdeck · single-user local app operations dashboard"
+  }
+]

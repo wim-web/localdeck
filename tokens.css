@@ -1,0 +1,89 @@
+/* Hallmark · macrostructure: Workbench · genre: modern-minimal
+ * tone: distil · palette: Cobalt (electric-blue anchor)
+ * design-system: design.md · designed-as-app
+ * nav: N13 inline command · footer: Ft2 inline rule · enrichment: none
+ */
+:root {
+  --color-paper: oklch(98.5% 0.004 250);
+  --color-paper-2: oklch(96.5% 0.006 252);
+  --color-paper-3: oklch(93.5% 0.008 252);
+  --color-ink: oklch(24% 0.02 258);
+  --color-ink-2: oklch(34% 0.018 257);
+  --color-rule: oklch(87% 0.01 252);
+  --color-rule-2: oklch(78% 0.012 254);
+  --color-muted: oklch(51% 0.015 256);
+  --color-neutral: oklch(42% 0.016 257);
+  --color-accent: oklch(55% 0.20 256);
+  --color-accent-ink: oklch(98.5% 0.004 250);
+  --color-focus: var(--color-graphite);
+  --color-graphite: oklch(22% 0.016 260);
+  --color-graphite-2: oklch(28% 0.018 260);
+  --color-on-graphite: oklch(94% 0.008 252);
+  --color-positive: oklch(52% 0.145 148);
+  --color-positive-soft: oklch(95% 0.034 148);
+  --color-danger: oklch(55% 0.18 27);
+  --color-danger-soft: oklch(95% 0.03 27);
+  --color-warning: oklch(53% 0.13 78);
+  --color-warning-soft: oklch(95% 0.034 78);
+  --color-scrim: oklch(18% 0.02 258 / 0.46);
+
+  --font-display: "SFMono-Regular", ui-monospace, "Hiragino Sans", "Yu Gothic UI", monospace;
+  --font-body: -apple-system, BlinkMacSystemFont, "Hiragino Sans", "Yu Gothic UI", sans-serif;
+
+  --font-weight-body: 400;
+  --font-weight-medium: 500;
+  --font-weight-display: 600;
+  --tracking-display: -0.025em;
+  --tracking-label: 0.08em;
+
+  --text-xs: 0.75rem;
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-md: 1.25rem;
+  --text-lg: 1.5625rem;
+  --text-xl: 1.9531rem;
+  --text-2xl: 2.4414rem;
+  --text-display: clamp(2.25rem, 4vw + 0.5rem, 4rem);
+
+  --space-3xs: 0.25rem;
+  --space-2xs: 0.5rem;
+  --space-xs: 0.75rem;
+  --space-sm: 1rem;
+  --space-md: 1.5rem;
+  --space-lg: 2rem;
+  --space-xl: 3rem;
+  --space-2xl: 4.5rem;
+  --space-3xl: 7rem;
+  --space-4xl: 9rem;
+
+  --page-gutter: clamp(1rem, 4vw, 3rem);
+  --page-max: 90rem;
+  --control-height: 2.75rem;
+  --control-height-touch: 3rem;
+  --control-textarea-min: 8rem;
+  --indicator-size: 0.875rem;
+  --command-width: 42rem;
+  --command-height: 44rem;
+
+  --ease-out: cubic-bezier(0.16, 1, 0.3, 1);
+  --ease-in: cubic-bezier(0.7, 0, 0.84, 0);
+  --ease-in-out: cubic-bezier(0.65, 0, 0.35, 1);
+  --dur-micro: 120ms;
+  --dur-short: 220ms;
+  --dur-long: 420ms;
+
+  --rule-hair: 1px;
+  --rule-fine: 2px;
+  --radius-card: 10px;
+  --radius-pill: 999px;
+  --radius-input: 6px;
+  --shadow-card: 0 1px 2px oklch(24% 0.02 258 / 0.05);
+
+  --z-base: 1;
+  --z-raised: 10;
+  --z-dropdown: 100;
+  --z-sticky: 200;
+  --z-modal: 400;
+  --z-toast: 500;
+  --z-tooltip: 600;
+}

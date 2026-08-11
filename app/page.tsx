@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import type { FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { FormEvent, KeyboardEvent as ReactKeyboardEvent } from "react";
 
 type ActionName = "start" | "restart" | "stop";
 
@@ -102,6 +102,26 @@ type FormState = {
   startTimeoutMs: string;
   stopTimeoutMs: string;
   headerUpHost: string;
+};
+
+type Notice = {
+  tone: "warning" | "error";
+  text: string;
+};
+
+type PendingDelete = {
+  app: LocalApp;
+  timeoutId: number;
+};
+
+type CommandItem = {
+  id: string;
+  label: string;
+  keywords: string;
+  disabled?: boolean;
+  reason?: string | null;
+  tone?: "default" | "danger";
+  run: () => void;
 };
 
 const REFRESH_INTERVAL_MS = 5_000;
@@ -245,14 +265,14 @@ function AppEditor({
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
 }) {
   return (
-    <form className="app-editor" onSubmit={onSubmit}>
+    <form className="app-editor editor-panel" onSubmit={onSubmit}>
       <div className="editor-heading">
         <div>
-          <span className="section-kicker">{editing ? "EDIT APP" : "NEW APP"}</span>
+          <span className="editor-mode">{editing ? "設定を編集" : "新規登録"}</span>
           <h3>{editing ? `${form.name}の設定` : "アプリを登録"}</h3>
           <p>保存するとSQLiteとCaddy routeへ即時反映されます。</p>
         </div>
-        <button className="text-button" type="button" onClick={onCancel}>閉じる</button>
+        <button className="button button--quiet" type="button" onClick={onCancel}>閉じる</button>
       </div>
 
       <div className="form-grid">
@@ -262,7 +282,7 @@ function AppEditor({
             required
             value={form.name}
             onChange={(event) => onChange("name", event.target.value)}
-            placeholder="Example App"
+            placeholder="Docs server"
           />
         </label>
         <label>
@@ -272,7 +292,7 @@ function AppEditor({
             value={form.id}
             disabled={editing}
             onChange={(event) => onChange("id", event.target.value)}
-            placeholder="example-app"
+            placeholder="docs-server"
             pattern="[a-z0-9][a-z0-9-]*[a-z0-9]|[a-z0-9]"
           />
         </label>
@@ -282,7 +302,7 @@ function AppEditor({
             required
             value={form.host}
             onChange={(event) => onChange("host", event.target.value)}
-            placeholder="example.localhost"
+            placeholder="docs.localhost"
           />
         </label>
         <label>
@@ -299,7 +319,7 @@ function AppEditor({
           <input
             value={form.description}
             onChange={(event) => onChange("description", event.target.value)}
-            placeholder="このアプリの用途"
+            placeholder="ドキュメントのプレビュー"
           />
         </label>
         <label className="form-span-2">
@@ -421,19 +441,26 @@ function AppEditor({
       </div>
 
       <div className="editor-actions">
-        <button className="text-button" type="button" onClick={onCancel}>キャンセル</button>
-        <button className="primary-button" type="submit" disabled={saving}>
-          {saving ? "保存中…" : editing ? "変更を保存" : "登録してrouteを作成"}
+        <button className="button button--quiet" type="button" onClick={onCancel}>キャンセル</button>
+        <button
+          className="button button--solid"
+          type="submit"
+          disabled={saving}
+          aria-busy={saving}
+          data-state={saving ? "loading" : "default"}
+        >
+          {saving ? "保存中…" : editing ? "変更を保存" : "アプリを登録"}
         </button>
       </div>
     </form>
   );
 }
 
-function AppCard({
+function AppRow({
   app,
   busy,
   copied,
+  deletePending,
   onAction,
   onCopy,
   onEdit,
@@ -442,6 +469,7 @@ function AppCard({
   app: LocalApp;
   busy: boolean;
   copied: string | null;
+  deletePending: boolean;
   onAction: (app: LocalApp, action: ActionName) => void;
   onCopy: (key: string, value: string) => void;
   onEdit: (app: LocalApp) => void;
@@ -449,93 +477,70 @@ function AppCard({
 }) {
   const online = app.status === "online";
   const availableActions: ActionName[] = online ? ["restart", "stop"] : ["start"];
+  const copyKey = app.id + "-url";
+  const unavailable = availableActions.filter((action) => !app.actions[action].enabled);
 
   return (
-    <article className={`app-card app-card--${app.status}`}>
-      <div className="app-card__rail" aria-hidden="true" />
-      <div className="app-card__content">
-        <div className="app-card__heading">
-          <div className="app-identity">
-            <span className={`status-orb status-orb--${app.status}`} aria-hidden="true" />
-            <div>
-              <div className="app-eyebrow">
-                <span>{statusLabel(app.status)}</span>
-                {app.latencyMs !== null && <span>{app.latencyMs} ms</span>}
-              </div>
-              <h2>{app.name}</h2>
-            </div>
-          </div>
-          <div className="card-heading-actions">
-            <button className="icon-button" type="button" onClick={() => onEdit(app)}>
-              編集
-            </button>
-            <a className="open-app" href={app.url} target="_blank" rel="noreferrer">
-              開く <span aria-hidden="true">↗</span>
-            </a>
-          </div>
+    <article className={"app-row app-row--" + app.status}>
+      <div className="app-row__identity">
+        <div className="status-line">
+          <span className={"status-dot status-dot--" + app.status} aria-hidden="true" />
+          <span>{statusLabel(app.status)}</span>
+          {app.latencyMs !== null && <span className="status-latency">{app.latencyMs} ms</span>}
         </div>
+        <h3>{app.name}</h3>
+        <p>{app.description || "説明なし"}</p>
+      </div>
 
-        <p className="app-description">{app.description}</p>
-
-        <div className="route-panel">
-          <div className="route-main">
-            <span className="field-label">CADDY URL</span>
-            <a href={app.url} target="_blank" rel="noreferrer">
-              {app.url}
-            </a>
-          </div>
+      <div className="app-row__route">
+        <span className="cell-label">Route</span>
+        <div className="route-value">
+          <a href={app.url} target="_blank" rel="noreferrer">
+            {app.host}
+          </a>
           <button
-            className="copy-button"
+            className="button button--copy"
             type="button"
-            onClick={() => onCopy(`${app.id}-url`, app.url)}
-            aria-label={`${app.name} の URL をコピー`}
+            onClick={() => onCopy(copyKey, app.url)}
+            aria-label={app.name + " のURLをコピー"}
+            data-state={copied === copyKey ? "success" : "default"}
           >
-            {copied === `${app.id}-url` ? "コピー済み" : "コピー"}
+            {copied === copyKey ? "コピー済み" : "コピー"}
           </button>
         </div>
+        <code>{app.upstream ?? "upstream未取得"}</code>
+      </div>
 
-        <dl className="app-facts">
-          <div>
-            <dt>PORT</dt>
-            <dd>{app.port ?? "—"}</dd>
-          </div>
-          <div>
-            <dt>PID</dt>
-            <dd>{app.pid ?? "—"}</dd>
-          </div>
-          <div>
-            <dt>UPTIME</dt>
-            <dd>{app.uptime ?? "—"}</dd>
-          </div>
-          <div>
-            <dt>UPSTREAM</dt>
-            <dd>{app.upstream ?? "—"}</dd>
-          </div>
-        </dl>
-
-        <div className="directory-row">
-          <span className="field-label">DIRECTORY</span>
-          <code title={app.directory ?? undefined}>{shortenPath(app.directory)}</code>
+      <dl className="app-row__runtime">
+        <div>
+          <dt>Port</dt>
+          <dd>{app.port ?? "—"}</dd>
         </div>
+        <div>
+          <dt>PID</dt>
+          <dd>{app.pid ?? "—"}</dd>
+        </div>
+        <div>
+          <dt>Uptime</dt>
+          <dd>{app.uptime ?? "—"}</dd>
+        </div>
+      </dl>
 
-        {!app.caddyRouteFound && (
-          <div className="route-warning" role="note">
-            <span aria-hidden="true">!</span>
-            Caddy の現在設定にこのホストがありません。登録値で状態を監視しています。
-          </div>
-        )}
-
-        <div className="app-actions">
+      <div className="app-row__actions">
+        <div className="action-group" aria-label={app.name + " のプロセス操作"}>
           {availableActions.map((action) => {
             const availability = app.actions[action];
+            const reasonId = app.id + "-" + action + "-reason";
             return (
               <button
                 key={action}
-                className={`action-button action-button--${action}`}
+                className={"button button--process button--" + action}
                 type="button"
                 disabled={busy || !availability.enabled}
                 onClick={() => onAction(app, action)}
-                title={availability.reason ?? undefined}
+                aria-busy={busy}
+                aria-describedby={!availability.enabled && availability.reason ? reasonId : undefined}
+                data-state={busy ? "loading" : availability.enabled ? "default" : "disabled"}
               >
                 <span aria-hidden="true">
                   {busy ? "…" : action === "start" ? "▶" : action === "restart" ? "↻" : "■"}
@@ -544,17 +549,221 @@ function AppCard({
               </button>
             );
           })}
+        </div>
+        <div className="row-tools">
+          <button className="button button--quiet" type="button" onClick={() => onEdit(app)}>
+            編集
+          </button>
+          <a className="button button--quiet" href={app.url} target="_blank" rel="noreferrer">
+            開く <span aria-hidden="true">↗</span>
+          </a>
           <button
-            className="remove-button"
+            className="button button--danger"
             type="button"
-            disabled={busy}
+            disabled={busy || deletePending}
             onClick={() => onDelete(app)}
           >
             登録削除
           </button>
         </div>
+        {unavailable.length > 0 && (
+          <div className="action-reasons">
+            {unavailable.map((action) => (
+              <p key={action} id={app.id + "-" + action + "-reason"}>
+                {actionLabel(action)}できません — {app.actions[action].reason}
+              </p>
+            ))}
+          </div>
+        )}
       </div>
+
+      <details className="app-row__details">
+        <summary>詳細</summary>
+        <dl>
+          <div>
+            <dt>Directory</dt>
+            <dd><code>{shortenPath(app.directory)}</code></dd>
+          </div>
+          <div>
+            <dt>Direct URL</dt>
+            <dd>{app.directUrl ?? "—"}</dd>
+          </div>
+          <div>
+            <dt>Caddy route</dt>
+            <dd>{app.caddyRouteFound ? "同期済み" : "未同期"}</dd>
+          </div>
+          <div>
+            <dt>設定</dt>
+            <dd>{app.configured ? "登録済み" : "検出のみ"}</dd>
+          </div>
+        </dl>
+      </details>
+
+      {!app.caddyRouteFound && (
+        <div className="route-warning" role="note">
+          <span aria-hidden="true">!</span>
+          Caddyの現在設定にこのホストがありません。登録値で状態を監視しています。
+        </div>
+      )}
     </article>
+  );
+}
+
+function CommandPalette({
+  open,
+  commands,
+  onClose,
+}: {
+  open: boolean;
+  commands: CommandItem[];
+  onClose: () => void;
+}) {
+  const [query, setQuery] = useState("");
+  const [activeIndex, setActiveIndex] = useState(0);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+
+  const filteredCommands = useMemo(() => {
+    const normalized = query.trim().toLocaleLowerCase("ja-JP");
+    if (!normalized) return commands;
+    return commands.filter((command) =>
+      (command.label + " " + command.keywords).toLocaleLowerCase("ja-JP").includes(normalized),
+    );
+  }, [commands, query]);
+
+  useEffect(() => {
+    if (!open) return;
+    previousFocusRef.current = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    document.getElementById("app-workbench")?.setAttribute("inert", "");
+    const frame = window.requestAnimationFrame(() => {
+      setQuery("");
+      setActiveIndex(0);
+      inputRef.current?.focus();
+    });
+    return () => {
+      window.cancelAnimationFrame(frame);
+      document.getElementById("app-workbench")?.removeAttribute("inert");
+      previousFocusRef.current?.focus({ preventScroll: true });
+    };
+  }, [open]);
+
+  if (!open) return null;
+
+  function moveSelection(direction: 1 | -1) {
+    if (filteredCommands.length === 0) return;
+    let next = activeIndex;
+    for (let attempts = 0; attempts < filteredCommands.length; attempts += 1) {
+      next = (next + direction + filteredCommands.length) % filteredCommands.length;
+      if (!filteredCommands[next]?.disabled) {
+        setActiveIndex(next);
+        return;
+      }
+    }
+  }
+
+  function runCommand(command: CommandItem) {
+    if (command.disabled) return;
+    command.run();
+    onClose();
+  }
+
+  function handleKeyDown(event: ReactKeyboardEvent<HTMLInputElement>) {
+    if (event.key === "ArrowDown") {
+      event.preventDefault();
+      moveSelection(1);
+    } else if (event.key === "ArrowUp") {
+      event.preventDefault();
+      moveSelection(-1);
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      const command = filteredCommands[activeIndex];
+      if (command) runCommand(command);
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      onClose();
+    }
+  }
+
+  return (
+    <div
+      className="command-backdrop"
+      role="presentation"
+      onMouseDown={(event) => {
+        if (event.target === event.currentTarget) onClose();
+      }}
+    >
+      <section
+        className="command-palette"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="command-title"
+      >
+        <header>
+          <div>
+            <h2 id="command-title">コマンド</h2>
+            <p>登録、更新、アプリ操作を名前で絞り込みます。</p>
+          </div>
+          <button className="button button--palette-close" type="button" onClick={onClose}>
+            閉じる
+          </button>
+        </header>
+        <label className="command-search">
+          <span>操作を検索</span>
+          <input
+            ref={inputRef}
+            type="search"
+            value={query}
+            onChange={(event) => {
+              setQuery(event.target.value);
+              setActiveIndex(0);
+            }}
+            onKeyDown={handleKeyDown}
+            placeholder="アプリ名または操作"
+            role="combobox"
+            aria-expanded="true"
+            aria-controls="command-results"
+            aria-activedescendant={
+              filteredCommands[activeIndex] ? "command-" + filteredCommands[activeIndex].id : undefined
+            }
+          />
+        </label>
+        <p className="command-count" aria-live="polite">
+          {filteredCommands.length}件
+        </p>
+        <div className="command-results" id="command-results" role="listbox">
+          {filteredCommands.map((command, index) => (
+            <button
+              id={"command-" + command.id}
+              key={command.id}
+              className={
+                "command-item" +
+                (index === activeIndex ? " is-active" : "") +
+                (command.tone === "danger" ? " command-item--danger" : "")
+              }
+              type="button"
+              role="option"
+              aria-selected={index === activeIndex}
+              disabled={command.disabled}
+              onMouseMove={() => setActiveIndex(index)}
+              onClick={() => runCommand(command)}
+            >
+              <span>{command.label}</span>
+              {command.disabled && command.reason && <small>{command.reason}</small>}
+            </button>
+          ))}
+          {filteredCommands.length === 0 && (
+            <p className="command-empty">一致する操作はありません。</p>
+          )}
+        </div>
+        <footer>
+          <span>↑↓ 選択</span>
+          <span>Enter 実行</span>
+          <span>Esc 閉じる</span>
+        </footer>
+      </section>
+    </div>
   );
 }
 
@@ -564,15 +773,14 @@ export default function Home() {
   const [refreshing, setRefreshing] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busyApp, setBusyApp] = useState<string | null>(null);
-  const [notice, setNotice] = useState<{
-    tone: "success" | "warning" | "error";
-    text: string;
-  } | null>(null);
+  const [notice, setNotice] = useState<Notice | null>(null);
   const [autoRefresh, setAutoRefresh] = useState(true);
   const [copied, setCopied] = useState<string | null>(null);
   const [editorMode, setEditorMode] = useState<"create" | "edit" | null>(null);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
+  const [commandOpen, setCommandOpen] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
 
   const loadSnapshot = useCallback(async (quiet = false) => {
     if (!quiet) setRefreshing(true);
@@ -603,10 +811,22 @@ export default function Home() {
   }, [autoRefresh, busyApp, loadSnapshot]);
 
   useEffect(() => {
-    if (!notice) return;
-    const timeout = window.setTimeout(() => setNotice(null), 6_000);
-    return () => window.clearTimeout(timeout);
-  }, [notice]);
+    function handleShortcut(event: KeyboardEvent) {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLocaleLowerCase() === "k") {
+        event.preventDefault();
+        setCommandOpen((current) => !current);
+      } else if (event.key === "Escape") {
+        setCommandOpen(false);
+      }
+    }
+    document.addEventListener("keydown", handleShortcut);
+    return () => document.removeEventListener("keydown", handleShortcut);
+  }, []);
+
+  useEffect(() => {
+    if (!pendingDelete) return;
+    return () => window.clearTimeout(pendingDelete.timeoutId);
+  }, [pendingDelete]);
 
   const healthLabel = useMemo(() => {
     if (!snapshot) return "状態を取得中";
@@ -615,23 +835,18 @@ export default function Home() {
   }, [snapshot]);
 
   async function handleAction(app: LocalApp, action: ActionName) {
-    if (
-      (action === "restart" || action === "stop") &&
-      !window.confirm(`${app.name} を${actionLabel(action)}します。よろしいですか？`)
-    ) {
-      return;
-    }
-
     setBusyApp(app.id);
     setNotice(null);
     try {
-      const response = await fetch(`/api/apps/${app.id}/${action}`, {
+      const response = await fetch("/api/apps/" + app.id + "/" + action, {
         method: "POST",
         headers: { "X-Localdeck-Action": "1" },
       });
       const body = await readJson<ActionResponse>(response);
       if (body.snapshot) setSnapshot(body.snapshot);
-      setNotice({ tone: "success", text: body.message ?? `${app.name} を操作しました` });
+      if (body.warning) {
+        setNotice({ tone: "warning", text: (body.message ?? app.name) + ": " + body.warning });
+      }
     } catch (requestError) {
       setNotice({
         tone: "error",
@@ -646,13 +861,23 @@ export default function Home() {
   function openCreateEditor() {
     setForm(EMPTY_FORM);
     setEditorMode("create");
-    window.setTimeout(() => document.querySelector(".app-editor")?.scrollIntoView({ behavior: "smooth" }), 0);
+    scrollEditorIntoView();
   }
 
   function openEditEditor(app: LocalApp) {
     setForm(definitionToForm(app.definition));
     setEditorMode("edit");
-    window.setTimeout(() => document.querySelector(".app-editor")?.scrollIntoView({ behavior: "smooth" }), 0);
+    scrollEditorIntoView();
+  }
+
+  function scrollEditorIntoView() {
+    window.setTimeout(() => {
+      const reduceMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      document.querySelector(".app-editor")?.scrollIntoView({
+        behavior: reduceMotion ? "auto" : "smooth",
+        block: "start",
+      });
+    }, 0);
   }
 
   function updateForm(field: keyof FormState, value: string) {
@@ -665,7 +890,7 @@ export default function Home() {
     setSaving(true);
     setNotice(null);
     try {
-      const response = await fetch(editing ? `/api/apps/${form.id}` : "/api/apps", {
+      const response = await fetch(editing ? "/api/apps/" + form.id : "/api/apps", {
         method: editing ? "PUT" : "POST",
         headers: {
           "Content-Type": "application/json",
@@ -675,10 +900,12 @@ export default function Home() {
       });
       const body = await readJson<ActionResponse>(response);
       if (body.snapshot) setSnapshot(body.snapshot);
-      setNotice({
-        tone: body.warning ? "warning" : "success",
-        text: body.warning ? `${body.message}: ${body.warning}` : body.message ?? "保存しました",
-      });
+      if (body.warning) {
+        setNotice({
+          tone: "warning",
+          text: (body.message ?? "保存しました") + ": " + body.warning,
+        });
+      }
       setEditorMode(null);
     } catch (requestError) {
       setNotice({
@@ -690,30 +917,43 @@ export default function Home() {
     }
   }
 
-  async function handleDeleteApp(app: LocalApp) {
-    const warning = app.status === "online"
-      ? "アプリのプロセスは停止せず、登録とCaddy routeだけを削除します。"
-      : "登録とCaddy routeを削除します。";
-    if (!window.confirm(`${app.name}を削除します。${warning}`)) return;
+  function handleDeleteApp(app: LocalApp) {
+    if (pendingDelete || busyApp) return;
+    const timeoutId = window.setTimeout(() => void commitDeleteApp(app), 8_000);
+    setPendingDelete({ app, timeoutId });
+    setNotice(null);
+    if (form.id === app.id) setEditorMode(null);
+  }
+
+  function undoDelete() {
+    if (!pendingDelete) return;
+    window.clearTimeout(pendingDelete.timeoutId);
+    setPendingDelete(null);
+  }
+
+  async function commitDeleteApp(app: LocalApp) {
+    setPendingDelete((current) => current?.app.id === app.id ? null : current);
     setBusyApp(app.id);
     setNotice(null);
     try {
-      const response = await fetch(`/api/apps/${app.id}`, {
+      const response = await fetch("/api/apps/" + app.id, {
         method: "DELETE",
         headers: { "X-Localdeck-Action": "1" },
       });
       const body = await readJson<ActionResponse>(response);
       if (body.snapshot) setSnapshot(body.snapshot);
-      setNotice({
-        tone: body.warning ? "warning" : "success",
-        text: body.warning ? `${body.message}: ${body.warning}` : body.message ?? "削除しました",
-      });
-      if (form.id === app.id) setEditorMode(null);
+      if (body.warning) {
+        setNotice({
+          tone: "warning",
+          text: (body.message ?? "登録を削除しました") + ": " + body.warning,
+        });
+      }
     } catch (requestError) {
       setNotice({
         tone: "error",
         text: requestError instanceof Error ? requestError.message : "削除に失敗しました",
       });
+      await loadSnapshot(true);
     } finally {
       setBusyApp(null);
     }
@@ -729,7 +969,12 @@ export default function Home() {
       });
       const body = await readJson<ActionResponse>(response);
       if (body.snapshot) setSnapshot(body.snapshot);
-      setNotice({ tone: "success", text: body.message ?? "Caddyへ同期しました" });
+      if (body.warning) {
+        setNotice({
+          tone: "warning",
+          text: (body.message ?? "Caddyへ同期しました") + ": " + body.warning,
+        });
+      }
     } catch (requestError) {
       setNotice({
         tone: "error",
@@ -750,181 +995,334 @@ export default function Home() {
     }
   }
 
-  return (
-    <main className="dashboard-shell">
-      <header className="topbar">
-        <a className="brand" href="#top" aria-label="Localdeck トップ">
-          <span className="brand-mark" aria-hidden="true">
-            L/
-          </span>
-          <span>
-            <strong>LOCALDECK</strong>
-            <small>LOCAL APP CONTROL</small>
-          </span>
-        </a>
-        <div className="topbar-actions">
-          <button className="primary-button primary-button--compact" type="button" onClick={openCreateEditor}>
-            ＋ アプリ登録
-          </button>
-          <label className="auto-refresh">
-            <input
-              type="checkbox"
-              checked={autoRefresh}
-              onChange={(event) => setAutoRefresh(event.target.checked)}
-            />
-            <span aria-hidden="true" />
-            自動更新
-          </label>
-          <button
-            className={`refresh-button${refreshing ? " is-refreshing" : ""}`}
-            type="button"
-            onClick={() => void loadSnapshot(false)}
-            disabled={refreshing}
-          >
-            <span aria-hidden="true">↻</span>
-            更新
-          </button>
-        </div>
-      </header>
+  const visibleApps = snapshot?.apps.filter((app) => app.id !== pendingDelete?.app.id) ?? [];
+  const commands: CommandItem[] = [
+    {
+      id: "register",
+      label: "アプリを登録",
+      keywords: "new create registration 新規",
+      run: openCreateEditor,
+    },
+    {
+      id: "refresh",
+      label: "状態を更新",
+      keywords: "refresh reload 再読込",
+      disabled: refreshing,
+      reason: refreshing ? "更新中" : null,
+      run: () => void loadSnapshot(false),
+    },
+    {
+      id: "auto-refresh",
+      label: autoRefresh ? "自動更新を停止" : "自動更新を開始",
+      keywords: "auto refresh polling 5秒",
+      run: () => setAutoRefresh((current) => !current),
+    },
+    {
+      id: "caddy-sync",
+      label: "Caddy routeを同期",
+      keywords: "caddy route sync 再同期",
+      disabled: refreshing || !snapshot?.caddy.connected || snapshot.caddy.inSync,
+      reason: !snapshot?.caddy.connected
+        ? "Caddy未接続"
+        : snapshot.caddy.inSync
+          ? "同期済み"
+          : refreshing
+            ? "更新中"
+            : null,
+      run: () => void handleCaddySync(),
+    },
+  ];
 
-      <section className="intro" id="top">
-        <div className="intro-copy">
-          <span className="section-kicker">LOCAL / OPERATIONS</span>
-          <h1>ローカルアプリ管制室</h1>
-          <p>アプリの登録からCaddy route、起動・再起動・停止まで、ここで一括管理できます。</p>
-        </div>
-        <div className="system-readout" aria-label="システム概要">
-          <div className="readout-status">
+  snapshot?.apps.forEach((app) => {
+    commands.push(
+      {
+        id: app.id + "-open",
+        label: app.name + "を開く",
+        keywords: app.host + " open browser",
+        run: () => {
+          const opened = window.open(app.url, "_blank", "noopener,noreferrer");
+          if (opened) opened.opener = null;
+        },
+      },
+      {
+        id: app.id + "-copy",
+        label: app.name + "のURLをコピー",
+        keywords: app.host + " copy clipboard",
+        run: () => void handleCopy(app.id + "-url", app.url),
+      },
+      {
+        id: app.id + "-edit",
+        label: app.name + "の設定を編集",
+        keywords: app.host + " edit configure",
+        run: () => openEditEditor(app),
+      },
+    );
+
+    const actions: ActionName[] = app.status === "online" ? ["restart", "stop"] : ["start"];
+    actions.forEach((action) => {
+      const availability = app.actions[action];
+      commands.push({
+        id: app.id + "-" + action,
+        label: app.name + "を" + actionLabel(action),
+        keywords: app.host + " process " + action,
+        disabled: busyApp === app.id || !availability.enabled,
+        reason: busyApp === app.id ? "操作中" : availability.reason,
+        run: () => void handleAction(app, action),
+      });
+    });
+
+    commands.push({
+      id: app.id + "-delete",
+      label: app.name + "の登録を削除",
+      keywords: app.host + " remove delete",
+      disabled: Boolean(pendingDelete) || busyApp === app.id,
+      reason: pendingDelete ? "別の削除を取り消せます" : busyApp === app.id ? "操作中" : null,
+      tone: "danger",
+      run: () => handleDeleteApp(app),
+    });
+  });
+
+  return (
+    <>
+      <main className="workbench" id="app-workbench">
+        <header className="topbar" id="top">
+          <a className="brand" href="#top" aria-label="Localdeck トップ">
+            <span className="brand-signal" aria-hidden="true">L/</span>
+            <span className="brand-copy">
+              <strong>LOCALDECK</strong>
+              <small>LOCAL APP CONTROL</small>
+            </span>
+          </a>
+
+          <div className="topbar-actions">
+            <button
+              className="button command-trigger"
+              type="button"
+              onClick={() => setCommandOpen(true)}
+              aria-haspopup="dialog"
+              aria-expanded={commandOpen}
+            >
+              <span>コマンド</span>
+              <kbd>⌘K</kbd>
+            </button>
+            <label className="auto-refresh">
+              <input
+                type="checkbox"
+                checked={autoRefresh}
+                onChange={(event) => setAutoRefresh(event.target.checked)}
+              />
+              <span className="switch-track" aria-hidden="true" />
+              <span className="switch-label">自動更新</span>
+            </label>
+            <button
+              className="button refresh-button"
+              type="button"
+              onClick={() => void loadSnapshot(false)}
+              disabled={refreshing}
+              aria-busy={refreshing}
+              data-state={refreshing ? "loading" : "default"}
+            >
+              <span className="refresh-glyph" aria-hidden="true">↻</span>
+              {refreshing ? "更新中" : "更新"}
+            </button>
+          </div>
+        </header>
+
+        <section className="workbench-overview" aria-labelledby="page-heading">
+          <div className="overview-copy">
+            <h1 id="page-heading">ローカルアプリ</h1>
+            <p>登録、Caddy route、プロセス状態を一画面で確認し、その場で操作します。</p>
+          </div>
+          <div className="health-block">
+            <div className="health-state">
+              <span
+                className={
+                  "status-dot status-dot--" +
+                  (snapshot?.summary.offline === 0 ? "online" : "offline")
+                }
+                aria-hidden="true"
+              />
+              <div>
+                <span>システム状態</span>
+                <strong>{loading ? "確認中" : healthLabel}</strong>
+              </div>
+            </div>
+            <div className="checked-at">
+              <span>最終確認</span>
+              <time dateTime={snapshot?.generatedAt}>{formatCheckedAt(snapshot?.generatedAt)}</time>
+            </div>
+          </div>
+        </section>
+
+        <section className="stat-strip" aria-label="システム概要">
+          <div>
+            <strong>{snapshot?.summary.online ?? "—"}</strong>
+            <span>稼働中</span>
+          </div>
+          <div>
+            <strong>{snapshot?.summary.offline ?? "—"}</strong>
+            <span>停止中</span>
+          </div>
+          <div>
+            <strong>{snapshot?.summary.total ?? "—"}</strong>
+            <span>登録数</span>
+          </div>
+          <div>
+            <strong>
+              {snapshot ? snapshot.caddy.routeCount + "/" + snapshot.caddy.expectedRouteCount : "—"}
+            </strong>
+            <span>Caddy routes</span>
+          </div>
+        </section>
+
+        <section className="connection-bar" aria-label="Caddy接続状態">
+          <div className="connection-state">
             <span
-              className={`status-orb status-orb--${snapshot?.summary.offline === 0 ? "online" : "offline"}`}
+              className={
+                "status-dot status-dot--" +
+                (snapshot?.caddy.connected ? "online" : loading ? "unknown" : "offline")
+              }
               aria-hidden="true"
             />
-            <div>
-              <span>SYSTEM STATUS</span>
-              <strong>{loading ? "接続中" : healthLabel}</strong>
-            </div>
+            <strong>Caddy</strong>
+            <span>{snapshot?.caddy.connected ? "接続済み" : loading ? "確認中" : "未接続"}</span>
+            {snapshot?.caddy.latencyMs !== null && snapshot?.caddy.latencyMs !== undefined && (
+              <span className="connection-latency">{snapshot.caddy.latencyMs} ms</span>
+            )}
           </div>
-          <div className="readout-numbers">
-            <div>
-              <strong>{snapshot?.summary.online ?? "—"}</strong>
-              <span>ONLINE</span>
-            </div>
-            <div>
-              <strong>{snapshot?.summary.offline ?? "—"}</strong>
-              <span>OFFLINE</span>
-            </div>
-            <div>
-              <strong>{snapshot?.summary.total ?? "—"}</strong>
-              <span>TOTAL</span>
-            </div>
+          <div className="connection-actions">
+            {snapshot?.caddy.connected && !snapshot.caddy.inSync && (
+              <button
+                className="button button--sync"
+                type="button"
+                onClick={() => void handleCaddySync()}
+                disabled={refreshing}
+              >
+                Routeを同期
+              </button>
+            )}
+            <span>{autoRefresh ? "5秒ごとに更新" : "手動更新"}</span>
           </div>
-        </div>
-      </section>
-
-      <section className="connection-strip" aria-label="接続状態">
-        <div>
-          <span
-            className={`mini-light ${snapshot?.caddy.connected ? "mini-light--online" : "mini-light--offline"}`}
-            aria-hidden="true"
-          />
-          <strong>Caddy</strong>
-          <span>{snapshot?.caddy.connected ? "接続済み" : loading ? "確認中" : "未接続"}</span>
-          {snapshot?.caddy.connected && (
-            <span>{snapshot.caddy.routeCount}/{snapshot.caddy.expectedRouteCount} app routes</span>
-          )}
-          {snapshot?.caddy.connected && !snapshot.caddy.inSync && (
-            <button className="inline-sync" type="button" onClick={() => void handleCaddySync()}>
-              再同期
-            </button>
-          )}
-        </div>
-        <div>
-          <span>最終確認</span>
-          <time dateTime={snapshot?.generatedAt}>{formatCheckedAt(snapshot?.generatedAt)}</time>
-          <span className="refresh-cadence">{autoRefresh ? "5秒ごと" : "手動更新"}</span>
-        </div>
-      </section>
-
-      {error && (
-        <section className="error-banner" role="alert">
-          <div>
-            <strong>管理 API に接続できません</strong>
-            <span>{error}</span>
-          </div>
-          <button type="button" onClick={() => void loadSnapshot(false)}>
-            再試行
-          </button>
         </section>
-      )}
 
-      <section className="apps-section" aria-labelledby="apps-heading">
-        <div className="section-heading">
-          <div>
-            <span className="section-kicker">SERVICES</span>
-            <h2 id="apps-heading">アプリ一覧</h2>
-          </div>
-          <div className="section-heading-actions">
-            <span>{snapshot ? `${snapshot.apps.length} APPS` : "READING…"}</span>
-            <button className="primary-button primary-button--compact" type="button" onClick={openCreateEditor}>
-              ＋ 登録
+        {error && (
+          <section className="error-banner" role="alert">
+            <div>
+              <strong>管理APIに接続できません</strong>
+              <span>{error}。サーバーの状態を確認して再試行してください。</span>
+            </div>
+            <button className="button button--error" type="button" onClick={() => void loadSnapshot(false)}>
+              再試行
             </button>
-          </div>
-        </div>
-
-        {editorMode && (
-          <AppEditor
-            form={form}
-            editing={editorMode === "edit"}
-            saving={saving}
-            onChange={updateForm}
-            onCancel={() => setEditorMode(null)}
-            onSubmit={(event) => void handleSaveApp(event)}
-          />
+          </section>
         )}
 
-        <div className="apps-grid" aria-busy={loading}>
-          {snapshot?.apps.map((app) => (
-            <AppCard
-              key={app.id}
-              app={app}
-              busy={busyApp === app.id}
-              copied={copied}
-              onAction={(selectedApp, action) => void handleAction(selectedApp, action)}
-              onCopy={(key, value) => void handleCopy(key, value)}
-              onEdit={openEditEditor}
-              onDelete={(selectedApp) => void handleDeleteApp(selectedApp)}
-            />
-          ))}
-
-          {loading && !snapshot && (
-            <div className="loading-panel" role="status">
-              <span className="loading-pulse" aria-hidden="true" />
-              <div>
-                <strong>SQLiteとCaddyの状態を確認しています</strong>
-                <span>ポートとプロセス情報を読み込み中…</span>
-              </div>
+        <section className="registry" aria-labelledby="apps-heading">
+          <header className="registry-heading">
+            <div>
+              <h2 id="apps-heading">アプリ一覧</h2>
+              <p>{snapshot ? snapshot.apps.length + "件を登録中" : "状態を読み込み中"}</p>
             </div>
+            <button className="button button--register" type="button" onClick={openCreateEditor}>
+              アプリを登録
+            </button>
+          </header>
+
+          {editorMode && (
+            <AppEditor
+              form={form}
+              editing={editorMode === "edit"}
+              saving={saving}
+              onChange={updateForm}
+              onCancel={() => setEditorMode(null)}
+              onSubmit={(event) => void handleSaveApp(event)}
+            />
           )}
 
-          {!loading && snapshot?.apps.length === 0 && (
-            <div className="loading-panel">
-              <div>
-                <strong>登録済みアプリはありません</strong>
-                <span>「アプリ登録」から最初のrouteを追加できます。</span>
+          <div className="apps-ledger" aria-busy={loading}>
+            <div className="ledger-head" aria-hidden="true">
+              <span>Application</span>
+              <span>Route</span>
+              <span>Runtime</span>
+              <span>Operations</span>
+            </div>
+
+            {visibleApps.map((app) => (
+              <AppRow
+                key={app.id}
+                app={app}
+                busy={busyApp === app.id}
+                copied={copied}
+                deletePending={Boolean(pendingDelete)}
+                onAction={(selectedApp, action) => void handleAction(selectedApp, action)}
+                onCopy={(key, value) => void handleCopy(key, value)}
+                onEdit={openEditEditor}
+                onDelete={handleDeleteApp}
+              />
+            ))}
+
+            {loading && !snapshot && (
+              <div className="loading-panel" role="status">
+                <span className="loading-indicator" aria-hidden="true" />
+                <div>
+                  <strong>SQLiteとCaddyを確認中</strong>
+                  <span>アプリとプロセスの状態を読み込んでいます。</span>
+                </div>
               </div>
+            )}
+
+            {!loading && snapshot?.apps.length === 0 && (
+              <div className="empty-state">
+                <span className="empty-mark" aria-hidden="true">0</span>
+                <div>
+                  <strong>登録済みアプリはありません</strong>
+                  <span>最初のhost、upstream、起動方法を登録してください。</span>
+                </div>
+                <button className="button button--register" type="button" onClick={openCreateEditor}>
+                  アプリを登録
+                </button>
+              </div>
+            )}
+          </div>
+        </section>
+
+        <footer className="footer-line">
+          <span>LOCALDECK · LOOPBACK ONLY</span>
+          <span>コマンドはシェルを介さず、登録した引数だけを実行します。</span>
+        </footer>
+
+        <div className="feedback-stack">
+          {pendingDelete && (
+            <div className="undo-notice" role="status">
+              <div>
+                <strong>{pendingDelete.app.name}を一覧から外しました</strong>
+                <span>
+                  {pendingDelete.app.status === "online"
+                    ? "8秒後に登録とrouteを削除します。プロセスは停止しません。"
+                    : "8秒後に登録とrouteを削除します。"}
+                </span>
+              </div>
+              <button className="button button--undo" type="button" onClick={undoDelete}>
+                元に戻す
+              </button>
+            </div>
+          )}
+          {notice && (
+            <div className={"notice notice--" + notice.tone} role="alert">
+              <span>{notice.text}</span>
+              <button className="button button--notice-close" type="button" onClick={() => setNotice(null)}>
+                閉じる
+              </button>
             </div>
           )}
         </div>
-      </section>
+      </main>
 
-      <footer>
-        <span>LOCALDECK / LOOPBACK ONLY</span>
-        <span>コマンドはシェルを介さず、登録した引数だけを実行します。</span>
-      </footer>
-
-      <div className="toast-region" aria-live="polite" aria-atomic="true">
-        {notice && <div className={`toast toast--${notice.tone}`}>{notice.text}</div>}
-      </div>
-    </main>
+      <CommandPalette
+        open={commandOpen}
+        commands={commands}
+        onClose={() => setCommandOpen(false)}
+      />
+    </>
   );
 }
