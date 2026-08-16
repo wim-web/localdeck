@@ -19,7 +19,6 @@ type LifecycleDefinition =
   | {
       strategy: "process";
       start: string[];
-      logFile: string;
       startTimeoutMs: number;
       stopTimeoutMs: number;
     }
@@ -97,7 +96,6 @@ type FormState = {
   startCommand: string;
   restartCommand: string;
   stopCommand: string;
-  logFile: string;
   timeoutMs: string;
   startTimeoutMs: string;
   stopTimeoutMs: string;
@@ -138,7 +136,6 @@ const EMPTY_FORM: FormState = {
   startCommand: "",
   restartCommand: "",
   stopCommand: "",
-  logFile: "",
   timeoutMs: "120000",
   startTimeoutMs: "30000",
   stopTimeoutMs: "15000",
@@ -169,7 +166,6 @@ function definitionToForm(app: AppDefinition): FormState {
     startCommand: commandToText(lifecycle?.start),
     restartCommand: lifecycle?.strategy === "commands" ? commandToText(lifecycle.restart) : "",
     stopCommand: lifecycle?.strategy === "commands" ? commandToText(lifecycle.stop) : "",
-    logFile: lifecycle?.strategy === "process" ? lifecycle.logFile : "",
     timeoutMs: lifecycle?.strategy === "commands" ? String(lifecycle.timeoutMs) : "120000",
     startTimeoutMs:
       lifecycle?.strategy === "process" ? String(lifecycle.startTimeoutMs) : "30000",
@@ -193,7 +189,6 @@ function formToDefinition(form: FormState): AppDefinition {
     lifecycle = {
       strategy: "process",
       start: textToCommand(form.startCommand) ?? [],
-      logFile: form.logFile,
       startTimeoutMs: Number(form.startTimeoutMs),
       stopTimeoutMs: Number(form.stopTimeoutMs),
     };
@@ -407,15 +402,9 @@ function AppEditor({
 
         {form.strategy === "process" && (
           <>
-            <label className="form-span-2">
-              <span>ログ保存先</span>
-              <input
-                required
-                value={form.logFile}
-                onChange={(event) => onChange("logFile", event.target.value)}
-                placeholder="/absolute/path/to/app/log/localdeck.log"
-              />
-            </label>
+            <p className="form-span-2 form-note">
+              ログはLocaldeck側の <code>logs/apps/&lt;アプリID&gt;.log</code> に保存します。
+            </p>
             <label>
               <span>起動待ち（ms）</span>
               <input

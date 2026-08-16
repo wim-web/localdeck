@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -152,17 +152,78 @@ test("process 方式は登録ディレクトリのプロセスを起動して安
         "-e",
         `require('node:net').createServer(() => {}).listen(${port}, '127.0.0.1')`,
       ],
-      logFile: path.join(temporaryDirectory, "process.log"),
+      startTimeoutMs: 5000,
+      stopTimeoutMs: 5000,
+    },
+  };
+  const appLogDirectory = path.join(temporaryDirectory, "localdeck-logs");
+
+  const started = await executeAction(app, "start", { appLogDirectory });
+  assert.equal((await isPortOpen("127.0.0.1", port)).online, true);
+  assert.match(started.output, /test-process\.log$/);
+  assert.match(
+    await readFile(path.join(appLogDirectory, "test-process.log"), "utf8"),
+    /Localdeck start/,
+  );
+
+  await executeAction(app, "stop", { appLogDirectory });
+  assert.equal((await isPortOpen("127.0.0.1", port)).online, false);
+});
+
+test("process 方式の起動直後エラーは起動待ちを残さない", async (t) => {
+  const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "localdeck-failure-test-"));
+  t.after(() => rm(temporaryDirectory, { recursive: true, force: true }));
+  const app = {
+    id: "test-failure",
+    name: "Test Failure",
+    host: "failure.localhost",
+    upstream: "127.0.0.1:65534",
+    upstreams: ["127.0.0.1:65534"],
+    directory: temporaryDirectory,
+    configured: true,
+    lifecycle: {
+      strategy: "process",
+      start: [process.execPath, "-e", "process.exit(1)"],
+      startTimeoutMs: 5000,
+      stopTimeoutMs: 5000,
+    },
+  };
+  const startedAt = Date.now();
+
+  await assert.rejects(
+    executeAction(app, "start", {
+      appLogDirectory: path.join(temporaryDirectory, "localdeck-logs"),
+    }),
+    /起動直後に終了しました/,
+  );
+  assert.ok(Date.now() - startedAt < 2000);
+});
+
+test("process 方式は存在しない起動コマンドを公開エラーとして返す", async (t) => {
+  const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "localdeck-spawn-test-"));
+  t.after(() => rm(temporaryDirectory, { recursive: true, force: true }));
+  const app = {
+    id: "test-spawn",
+    name: "Test Spawn",
+    host: "spawn.localhost",
+    upstream: "127.0.0.1:65533",
+    upstreams: ["127.0.0.1:65533"],
+    directory: temporaryDirectory,
+    configured: true,
+    lifecycle: {
+      strategy: "process",
+      start: [path.join(temporaryDirectory, "missing-command")],
       startTimeoutMs: 5000,
       stopTimeoutMs: 5000,
     },
   };
 
-  await executeAction(app, "start");
-  assert.equal((await isPortOpen("127.0.0.1", port)).online, true);
-
-  await executeAction(app, "stop");
-  assert.equal((await isPortOpen("127.0.0.1", port)).online, false);
+  await assert.rejects(
+    executeAction(app, "start", {
+      appLogDirectory: path.join(temporaryDirectory, "localdeck-logs"),
+    }),
+    /起動できませんでした/,
+  );
 });
 
 test("Localdeck の起動プロセスを呼び出し元とは別セッションへ切り離す", async (t) => {

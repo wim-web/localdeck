@@ -17,6 +17,7 @@ const serverDirectory = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(serverDirectory, "..");
 const staticRoot = path.join(projectRoot, "dist-local");
 const pidFile = path.join(projectRoot, "state", "localdeck.pid");
+const appLogDirectory = path.join(projectRoot, "logs", "apps");
 const legacyConfigPath = process.env.LOCALDECK_CONFIG
   ? path.resolve(process.env.LOCALDECK_CONFIG)
   : path.join(projectRoot, "apps.config.json");
@@ -246,7 +247,7 @@ async function handleApi(request, response, pathname) {
 
     actionLocks.add(appId);
     try {
-      const result = await executeAction(app, action);
+      const result = await executeAction(app, action, { appLogDirectory });
       sendJson(response, 200, {
         ok: true,
         ...result,

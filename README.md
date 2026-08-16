@@ -37,6 +37,7 @@ UIから以下を登録・編集・削除できます。
 - proxyへ転送するHostヘッダー
 
 設定は `state/localdeck.sqlite` に保存され、Caddyへ自動反映されます。環境変数は名前だけを保存し、値は保存しません。
+フォアグラウンドプロセス方式の標準出力・標準エラーは、アプリIDごとに `logs/apps/<app-id>.log` へ保存されます。各PJ側でログファイルやPIDファイルを用意する必要はありません。
 
 アプリを削除しても実行中のプロセスは停止しないため、必要なら先にUIから停止してください。同じプロセスをlaunchdなど別のSupervisorと同時に管理しないでください。
 
@@ -47,7 +48,7 @@ UIから以下を登録・編集・削除できます。
 ```text
 state/localdeck.sqlite
 state/*.pid
-logs/*.log
+logs/apps/*.log
 launchd/*.plist
 ```
 

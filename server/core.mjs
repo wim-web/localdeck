@@ -6,6 +6,7 @@ import path from "node:path";
 const DEFAULT_CONNECT_TIMEOUT_MS = 700;
 const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
 const MAX_COMMAND_OUTPUT = 12_000;
+const managedProcessGroups = new Map();
 
 export class PublicError extends Error {
   constructor(message, status = 400) {
@@ -151,12 +152,9 @@ function normalizeLifecycle(value, directory) {
       timeoutMs: positiveInteger(value.timeoutMs, "操作タイムアウト", 120_000),
     };
   }
-  const logFile = requiredString(value.logFile, "ログ保存先", 2000);
-  if (!path.isAbsolute(logFile)) throw new PublicError("ログ保存先は絶対パスで入力してください");
   return {
     strategy: "process",
     start: normalizeCommand(value.start, "起動コマンド", true),
-    logFile,
     startTimeoutMs: positiveInteger(value.startTimeoutMs, "起動タイムアウト", 30_000),
     stopTimeoutMs: positiveInteger(value.stopTimeoutMs, "停止タイムアウト", 15_000),
   };
@@ -360,12 +358,21 @@ async function assertManagedPid(app, pid) {
   }
 }
 
-async function waitForPort(address, port, expectedOnline, timeoutMs) {
+async function waitForPort(address, port, expectedOnline, timeoutMs, signal) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
+    if (signal?.aborted) return null;
     const status = await isPortOpen(address, port, 400);
     if (status.online === expectedOnline) return status;
-    await new Promise((resolve) => setTimeout(resolve, 250));
+    await new Promise((resolve) => {
+      const finish = () => {
+        clearTimeout(timer);
+        signal?.removeEventListener("abort", finish);
+        resolve();
+      };
+      const timer = setTimeout(finish, 250);
+      signal?.addEventListener("abort", finish, { once: true });
+    });
   }
   throw new PublicError(
     expectedOnline
@@ -373,6 +380,20 @@ async function waitForPort(address, port, expectedOnline, timeoutMs) {
       : `ポート ${port} が停止待ち時間内に閉じませんでした`,
     504,
   );
+}
+
+async function waitForProcessExit(pid, timeoutMs) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      process.kill(pid, 0);
+    } catch (error) {
+      if (error?.code === "ESRCH") return;
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new PublicError(`PID ${pid} が停止待ち時間内に終了しませんでした`, 504);
 }
 
 function ensureRequiredEnvironment(app) {
@@ -385,7 +406,15 @@ function ensureRequiredEnvironment(app) {
   }
 }
 
-async function startDetachedProcess(app, endpoint) {
+function resolveAppLogFile(app, options) {
+  const logDirectory = options.appLogDirectory;
+  if (!logDirectory || !path.isAbsolute(logDirectory)) {
+    throw new PublicError("Localdeckのアプリログ保存先が設定されていません", 500);
+  }
+  return path.join(logDirectory, `${app.id}.log`);
+}
+
+async function startDetachedProcess(app, endpoint, options) {
   ensureRequiredEnvironment(app);
   const current = await isPortOpen(endpoint.address, endpoint.port);
   if (current.online) throw new PublicError(`${app.name} はすでに起動しています`, 409);
@@ -395,13 +424,13 @@ async function startDetachedProcess(app, endpoint) {
     throw new PublicError(`${app.name} の起動コマンドがありません`, 409);
   }
 
-  const logFile = lifecycle.logFile;
-  if (!logFile) throw new PublicError(`${app.name} のログ保存先がありません`, 409);
+  const logFile = resolveAppLogFile(app, options);
   await mkdir(path.dirname(logFile), { recursive: true });
   await appendFile(logFile, `\n[${new Date().toISOString()}] Localdeck start\n`, "utf8");
   const handle = await open(logFile, "a");
 
   let child;
+  let earlyFailure;
   try {
     child = spawn(lifecycle.start[0], lifecycle.start.slice(1), {
       cwd: app.directory,
@@ -410,35 +439,85 @@ async function startDetachedProcess(app, endpoint) {
       shell: false,
       stdio: ["ignore", handle.fd, handle.fd],
     });
+    earlyFailure = new Promise((_, reject) => {
+      child.once("error", (error) =>
+        reject(new PublicError(`起動できませんでした: ${error.message}`, 500)),
+      );
+      child.once("exit", () => {
+        reject(new PublicError(`起動直後に終了しました。ログ: ${logFile}`, 500));
+      });
+    });
+    void earlyFailure.catch(() => undefined);
   } finally {
     await handle.close();
   }
 
-  const earlyFailure = new Promise((_, reject) => {
-    child.once("error", (error) =>
-      reject(new PublicError(`起動できませんでした: ${error.message}`, 500)),
-    );
-    child.once("exit", (code) => {
-      if (code !== 0) {
-        reject(new PublicError(`起動直後に終了しました。ログ: ${logFile}`, 500));
-      }
-    });
-  });
+  const childPid = Number.isInteger(child.pid) && child.pid > 1 ? child.pid : null;
+  if (childPid) managedProcessGroups.set(app.id, childPid);
   child.unref();
+  const startupController = new AbortController();
 
-  await Promise.race([
-    waitForPort(
-      endpoint.address,
-      endpoint.port,
-      true,
-      lifecycle.startTimeoutMs ?? 30_000,
-    ),
-    earlyFailure,
-  ]);
+  try {
+    await Promise.race([
+      waitForPort(
+        endpoint.address,
+        endpoint.port,
+        true,
+        lifecycle.startTimeoutMs ?? 30_000,
+        startupController.signal,
+      ),
+      earlyFailure,
+    ]);
+  } catch (error) {
+    managedProcessGroups.delete(app.id);
+    if (childPid) {
+      try {
+        process.kill(-childPid, "SIGTERM");
+      } catch (killError) {
+        if (killError?.code !== "ESRCH") throw killError;
+      }
+    }
+    throw error;
+  } finally {
+    startupController.abort();
+  }
   return { message: `${app.name} を起動しました`, output: `ログ: ${logFile}` };
 }
 
 async function stopDetachedProcess(app, endpoint) {
+  let managedPid = managedProcessGroups.get(app.id);
+  if (managedPid) {
+    try {
+      await assertManagedPid(app, managedPid);
+    } catch {
+      managedProcessGroups.delete(app.id);
+      managedPid = null;
+    }
+  }
+
+  if (managedPid) {
+    try {
+      const current = await isPortOpen(endpoint.address, endpoint.port);
+      process.kill(-managedPid, "SIGTERM");
+      await Promise.all([
+        waitForProcessExit(managedPid, app.lifecycle.stopTimeoutMs ?? 15_000),
+        current.online
+          ? waitForPort(
+              endpoint.address,
+              endpoint.port,
+              false,
+              app.lifecycle.stopTimeoutMs ?? 15_000,
+            )
+          : Promise.resolve(),
+      ]);
+      managedProcessGroups.delete(app.id);
+      return { message: `${app.name} を停止しました`, output: "" };
+    } catch (error) {
+      if (error?.code !== "ESRCH") throw error;
+      managedProcessGroups.delete(app.id);
+    }
+  }
+
   const current = await isPortOpen(endpoint.address, endpoint.port);
   if (!current.online) return { message: `${app.name} はすでに停止しています`, output: "" };
 
@@ -457,7 +536,7 @@ async function stopDetachedProcess(app, endpoint) {
   return { message: `${app.name} を停止しました`, output: "" };
 }
 
-export async function executeAction(app, action) {
+export async function executeAction(app, action, options = {}) {
   if (!app.configured || !app.lifecycle) {
     throw new PublicError("このルートは監視のみで、操作は登録されていません", 409);
   }
@@ -486,10 +565,10 @@ export async function executeAction(app, action) {
     };
   }
 
-  if (action === "start") return startDetachedProcess(app, endpoint);
+  if (action === "start") return startDetachedProcess(app, endpoint, options);
   if (action === "stop") return stopDetachedProcess(app, endpoint);
   await stopDetachedProcess(app, endpoint);
-  return startDetachedProcess(app, endpoint);
+  return startDetachedProcess(app, endpoint, options);
 }
 
 function actionAvailability(app, online) {
