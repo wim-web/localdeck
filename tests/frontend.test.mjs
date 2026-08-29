@@ -3,13 +3,16 @@ import { access, readFile } from "node:fs/promises";
 import test from "node:test";
 
 test("Localdeck の管理画面をローカル向けにbuildする", async () => {
-  const [html, page] = await Promise.all([
+  const [html, favicon, page] = await Promise.all([
     readFile(new URL("../dist-local/index.html", import.meta.url), "utf8"),
+    readFile(new URL("../local/favicon.svg", import.meta.url), "utf8"),
     readFile(new URL("../app/page.tsx", import.meta.url), "utf8"),
   ]);
 
   assert.match(html, /<html[^>]*lang="ja"/i);
   assert.match(html, /<title>Localdeck — ローカルアプリ管制室<\/title>/i);
+  assert.match(html, /<link[^>]*rel="icon"[^>]*href="\/assets\/favicon-[^"']+\.svg"/i);
+  assert.match(favicon, /<title>Localdeck<\/title>/i);
   assert.match(html, /\/assets\/index-[^"']+\.js/);
   assert.match(page, /fetch\("\/api\/apps"/);
   assert.match(page, /アプリを登録/);

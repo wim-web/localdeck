@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <title>Localdeck</title>
+  <rect width="64" height="64" rx="10" fill="#292b31" />
+  <path
+    d="M18 15v32h18"
+    fill="none"
+    stroke="#f0f1f3"
+    stroke-linecap="square"
+    stroke-linejoin="miter"
+    stroke-width="7"
+  />
+  <path
+    d="m47 15-9 34"
+    fill="none"
+    stroke="#2869df"
+    stroke-linecap="square"
+    stroke-width="6"
+  />
+</svg>
