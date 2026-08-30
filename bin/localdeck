@@ -432,6 +432,31 @@ stop_caddy() {
   echo "Caddy stopped"
 }
 
+restart_caddy() {
+  if command -v launchctl >/dev/null 2>&1 && \
+      install_caddy_service && caddy_service_loaded; then
+    pid_state=0
+    inspect_managed_pid "$caddy_pid_file" process_is_caddy || pid_state=$?
+    case "$pid_state" in
+      0|1|3) ;;
+      2) echo "error: invalid Caddy PID file: $caddy_pid_file" >&2; return 1 ;;
+      4) echo "error: PID $managed_pid is not the Localdeck-managed Caddy; refusing to restart it" >&2; return 1 ;;
+    esac
+
+    launchctl kickstart -k "$caddy_service_target"
+    if wait_until_ready managed_caddy_healthy 40; then
+      echo "Caddy restarted by launchd (PID $managed_pid)"
+      echo "Log: $caddy_log_file"
+      return 0
+    fi
+    echo "error: launchd-managed Caddy did not become ready within 10 seconds" >&2
+    return 1
+  fi
+
+  stop_caddy
+  start_caddy
+}
+
 start_all() {
   raise_open_file_limit
   start_caddy
@@ -450,6 +475,15 @@ stop_all() {
   stop_dashboard || result=$?
   stop_caddy || result=$?
   return "$result"
+}
+
+restart_all() {
+  raise_open_file_limit
+  stop_dashboard
+  restart_caddy
+  start_dashboard
+  sync_routes
+  echo "https://apps.localhost"
 }
 
 status_dashboard() {
@@ -502,8 +536,7 @@ case "$command" in
     start_all
     ;;
   restart)
-    stop_all
-    start_all
+    restart_all
     ;;
   stop)
     stop_all
