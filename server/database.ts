@@ -2,9 +2,21 @@ import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
-import { normalizeAppDefinition, PublicError, validateConfig } from "./core.mjs";
+import {
+  mergeAppInput,
+  normalizeAppDefinition,
+  requestedAppId,
+  validateConfig,
+} from "./config.js";
+import { errorCode, PublicError } from "./errors.js";
+import type {
+  AppDefinition,
+  LegacyConfig,
+  LocaldeckConfig,
+  LocaldeckStoreLike,
+} from "./types.js";
 
-const DEFAULT_CONFIG = {
+const DEFAULT_CONFIG: LocaldeckConfig = {
   version: 1,
   caddyAdminUrl: "http://127.0.0.1:2019/config/",
   dashboard: {
@@ -44,31 +56,42 @@ const SCHEMA = `
   ) STRICT;
 `;
 
-function parseJson(value, fallback) {
+type SqliteRow = Record<string, unknown>;
+
+function parseJson<T>(value: unknown, fallback: T): T {
   if (typeof value !== "string" || value.length === 0) return fallback;
   try {
-    return JSON.parse(value);
+    return JSON.parse(value) as T;
   } catch {
     return fallback;
   }
 }
 
-function rowToApp(row) {
-  if (!row) return null;
-  return {
-    id: row.id,
-    name: row.name,
-    description: row.description,
-    host: row.host,
-    upstream: row.upstream,
-    directory: row.directory,
-    requiredEnvironment: parseJson(row.required_environment_json, []),
-    lifecycle: parseJson(row.lifecycle_json, null),
-    proxy: parseJson(row.proxy_json, {}),
-  };
+function requiredText(row: SqliteRow, key: string): string {
+  const value = row[key];
+  if (typeof value !== "string") {
+    throw new Error(`SQLiteの${key}が文字列ではありません`);
+  }
+  return value;
 }
 
-function sqliteConflict(error) {
+function rowToApp(row: SqliteRow | undefined): AppDefinition | null {
+  if (!row) return null;
+  const directory = row.directory;
+  return normalizeAppDefinition({
+    id: requiredText(row, "id"),
+    name: requiredText(row, "name"),
+    description: requiredText(row, "description"),
+    host: requiredText(row, "host"),
+    upstream: requiredText(row, "upstream"),
+    directory: typeof directory === "string" ? directory : null,
+    requiredEnvironment: parseJson<unknown>(row.required_environment_json, []),
+    lifecycle: parseJson<unknown>(row.lifecycle_json, null),
+    proxy: parseJson<unknown>(row.proxy_json, {}),
+  });
+}
+
+function sqliteConflict(error: unknown): unknown {
   const message = error instanceof Error ? error.message : String(error);
   if (message.includes("apps.id")) {
     return new PublicError("同じアプリIDがすでに登録されています", 409);
@@ -79,63 +102,76 @@ function sqliteConflict(error) {
   return error;
 }
 
-function now() {
+function now(): string {
   return new Date().toISOString();
 }
 
-export class LocaldeckStore {
-  constructor(database, databasePath) {
-    this.database = database;
-    this.databasePath = databasePath;
-  }
+export class LocaldeckStore implements LocaldeckStoreLike {
+  constructor(
+    private readonly database: DatabaseSync,
+    readonly databasePath: string,
+  ) {}
 
-  getConfig() {
+  getConfig(): LocaldeckConfig {
     const settings = this.database
       .prepare("SELECT * FROM localdeck_settings WHERE singleton = 1")
-      .get();
+      .get() as SqliteRow | undefined;
     if (!settings) throw new Error("Localdeckの設定が初期化されていません");
+    const port = settings.dashboard_port;
+    if (typeof port !== "number") {
+      throw new Error("SQLiteのdashboard_portが数値ではありません");
+    }
     return {
       version: 1,
-      caddyAdminUrl: settings.caddy_admin_url,
+      caddyAdminUrl: requiredText(settings, "caddy_admin_url"),
       dashboard: {
-        name: settings.dashboard_name,
-        host: settings.dashboard_host,
-        bind: settings.dashboard_bind,
-        port: settings.dashboard_port,
+        name: requiredText(settings, "dashboard_name"),
+        host: requiredText(settings, "dashboard_host"),
+        bind: requiredText(settings, "dashboard_bind"),
+        port,
       },
       apps: this.listApps(),
     };
   }
 
-  listApps() {
+  listApps(): AppDefinition[] {
     return this.database
       .prepare("SELECT * FROM apps ORDER BY position ASC, name COLLATE NOCASE ASC")
       .all()
-      .map(rowToApp);
+      .map((row) => rowToApp(row as SqliteRow))
+      .filter((app): app is AppDefinition => app !== null);
   }
 
-  getApp(id) {
-    return rowToApp(this.database.prepare("SELECT * FROM apps WHERE id = ?").get(id));
+  getApp(id: string): AppDefinition | null {
+    const row = this.database.prepare("SELECT * FROM apps WHERE id = ?").get(id);
+    return rowToApp(row as SqliteRow | undefined);
   }
 
-  createApp(input) {
+  createApp(input: unknown): AppDefinition {
     const app = normalizeAppDefinition(input);
-    const position = this.database
+    const row = this.database
       .prepare("SELECT COALESCE(MAX(position), -1) + 1 AS next_position FROM apps")
-      .get().next_position;
+      .get() as SqliteRow | undefined;
+    const position = row?.next_position;
+    if (typeof position !== "number") {
+      throw new Error("SQLiteから次のアプリ表示位置を取得できませんでした");
+    }
     try {
       this.insertAppRecord(app, position);
     } catch (error) {
       throw sqliteConflict(error);
     }
-    return this.getApp(app.id);
+    const created = this.getApp(app.id);
+    if (!created) throw new Error("登録したアプリをSQLiteから取得できませんでした");
+    return created;
   }
 
-  updateApp(id, input) {
+  updateApp(id: string, input: unknown): AppDefinition | null {
     const current = this.getApp(id);
     if (!current) return null;
-    if (input?.id && input.id !== id) throw new Error("アプリIDは変更できません");
-    const app = normalizeAppDefinition({ ...current, ...input, id });
+    const inputId = requestedAppId(input);
+    if (inputId && inputId !== id) throw new Error("アプリIDは変更できません");
+    const app = normalizeAppDefinition(mergeAppInput(current, input, id));
     try {
       this.database
         .prepare(`
@@ -162,18 +198,18 @@ export class LocaldeckStore {
     return this.getApp(id);
   }
 
-  deleteApp(id) {
+  deleteApp(id: string): AppDefinition | null {
     const current = this.getApp(id);
     if (!current) return null;
     this.database.prepare("DELETE FROM apps WHERE id = ?").run(id);
     return current;
   }
 
-  close() {
+  close(): void {
     this.database.close();
   }
 
-  insertAppRecord(app, position) {
+  insertAppRecord(app: AppDefinition, position: number): void {
     const timestamp = now();
     this.database
       .prepare(`
@@ -200,18 +236,24 @@ export class LocaldeckStore {
   }
 }
 
-async function readLegacyConfig(legacyConfigPath) {
+async function readLegacyConfig(legacyConfigPath?: string): Promise<LegacyConfig> {
   if (!legacyConfigPath) return DEFAULT_CONFIG;
   try {
     const raw = await readFile(legacyConfigPath, "utf8");
-    return validateConfig(JSON.parse(raw));
+    return validateConfig(JSON.parse(raw) as unknown);
   } catch (error) {
-    if (error?.code === "ENOENT") return DEFAULT_CONFIG;
+    if (errorCode(error) === "ENOENT") return DEFAULT_CONFIG;
     throw error;
   }
 }
 
-export async function openLocaldeckStore({ databasePath, legacyConfigPath }) {
+export async function openLocaldeckStore({
+  databasePath,
+  legacyConfigPath,
+}: {
+  databasePath: string;
+  legacyConfigPath?: string;
+}): Promise<LocaldeckStore> {
   await mkdir(path.dirname(databasePath), { recursive: true });
   const database = new DatabaseSync(databasePath);
   database.exec("PRAGMA journal_mode = WAL");

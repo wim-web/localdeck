@@ -6,24 +6,31 @@ import reactHooks from "eslint-plugin-react-hooks";
 import globals from "globals";
 import tseslint from "typescript-eslint";
 
+const clientFiles = ["app/**/*.{ts,tsx}", "local/**/*.{ts,tsx}"];
+
 const eslintConfig = defineConfig([
   globalIgnores([
     "dist-local/**",
+    "dist-server/**",
     "logs/**",
     "state/**",
   ]),
   eslint.configs.recommended,
   ...tseslint.configs.recommended,
-  react.configs.flat.recommended,
-  react.configs.flat["jsx-runtime"],
-  reactHooks.configs.flat["recommended-latest"],
-  jsxA11y.flatConfigs.recommended,
+  { ...react.configs.flat.recommended, files: clientFiles },
+  { ...react.configs.flat["jsx-runtime"], files: clientFiles },
+  { ...reactHooks.configs.flat["recommended-latest"], files: clientFiles },
+  { ...jsxA11y.flatConfigs.recommended, files: clientFiles },
   {
+    files: ["server/**/*.ts", "tests/**/*.mjs", "*.{mjs,ts}"],
     languageOptions: {
-      globals: {
-        ...globals.browser,
-        ...globals.node,
-      },
+      globals: globals.node,
+    },
+  },
+  {
+    files: clientFiles,
+    languageOptions: {
+      globals: globals.browser,
     },
     settings: {
       react: {

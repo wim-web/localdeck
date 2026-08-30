@@ -1,23 +1,31 @@
-import { extractCaddyRoutes } from "./core.mjs";
+import { extractCaddyRoutes } from "./caddy-routes.js";
+import { errorMessage } from "./errors.js";
+import type { CaddyState, LocaldeckConfig } from "./types.js";
 
 export class CaddyError extends Error {
-  constructor(message, status = 502) {
+  readonly status: number;
+
+  constructor(message: string, status = 502) {
     super(message);
     this.name = "CaddyError";
     this.status = status;
   }
 }
 
-function adminUrl(config, pathname) {
+function adminUrl(config: LocaldeckConfig, pathname: string): URL {
   const configured = new URL(config.caddyAdminUrl);
   return new URL(pathname, configured.origin);
 }
 
-function caddyToken(value) {
+function caddyToken(value: string | number): string {
   return JSON.stringify(String(value));
 }
 
-function renderSite(host, upstream, proxy = {}) {
+function renderSite(
+  host: string,
+  upstream: string,
+  proxy: { headerUpHost?: string } = {},
+): string {
   const proxyLines = proxy.headerUpHost
     ? [
         `\treverse_proxy ${caddyToken(upstream)} {`,
@@ -33,7 +41,7 @@ function renderSite(host, upstream, proxy = {}) {
   ].join("\n");
 }
 
-export function renderCaddyfile(config) {
+export function renderCaddyfile(config: LocaldeckConfig): string {
   const configured = new URL(config.caddyAdminUrl);
   const adminAddress = `${configured.hostname}:${configured.port || "2019"}`;
   const sites = [
@@ -41,19 +49,12 @@ export function renderCaddyfile(config) {
       config.dashboard.host,
       `${config.dashboard.bind}:${config.dashboard.port}`,
     ),
-    ...(config.apps ?? []).map((app) => renderSite(app.host, app.upstream, app.proxy)),
+    ...config.apps.map((app) => renderSite(app.host, app.upstream, app.proxy)),
   ];
-  return [
-    "{",
-    `\tadmin ${adminAddress}`,
-    "}",
-    "",
-    sites.join("\n\n"),
-    "",
-  ].join("\n");
+  return ["{", `\tadmin ${adminAddress}`, "}", "", sites.join("\n\n"), ""].join("\n");
 }
 
-export async function fetchCaddyState(config) {
+export async function fetchCaddyState(config: LocaldeckConfig): Promise<CaddyState> {
   const startedAt = performance.now();
   try {
     const response = await fetch(adminUrl(config, "/config/"), {
@@ -61,7 +62,7 @@ export async function fetchCaddyState(config) {
       signal: AbortSignal.timeout(1500),
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const raw = await response.json();
+    const raw = await response.json() as unknown;
     return {
       connected: true,
       routes: extractCaddyRoutes(raw),
@@ -73,13 +74,15 @@ export async function fetchCaddyState(config) {
       connected: false,
       routes: [],
       latencyMs: null,
-      error: error instanceof Error ? error.message : "接続できませんでした",
+      error: errorMessage(error, "接続できませんでした"),
     };
   }
 }
 
-export async function syncCaddyConfig(config) {
-  let response;
+export async function syncCaddyConfig(
+  config: LocaldeckConfig,
+): Promise<{ ok: true; caddyfile: string }> {
+  let response: Response;
   try {
     response = await fetch(adminUrl(config, "/load"), {
       method: "POST",
@@ -92,7 +95,7 @@ export async function syncCaddyConfig(config) {
     });
   } catch (error) {
     throw new CaddyError(
-      `Caddyへ接続できませんでした: ${error instanceof Error ? error.message : "不明なエラー"}`,
+      `Caddyへ接続できませんでした: ${errorMessage(error, "不明なエラー")}`,
     );
   }
   if (!response.ok) {

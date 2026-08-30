@@ -57,5 +57,8 @@ launchd/*.plist
 ```sh
 npm test
 npm run lint
-npx tsc --noEmit
+npm run typecheck
 ```
+
+`npm run build` は管理画面を `dist-local/`、TypeScript製の管理サーバーを
+`dist-server/` へ出力します。Localdeckの起動コマンドはこのコンパイル済みサーバーを実行します。

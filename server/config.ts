@@ -1,0 +1,204 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+
+import { PublicError } from "./errors.js";
+import type {
+  AppDefinition,
+  LegacyConfig,
+  LifecycleDefinition,
+} from "./types.js";
+
+type UnknownRecord = Record<string, unknown>;
+
+function isRecord(value: unknown): value is UnknownRecord {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function requiredString(value: unknown, label: string, maxLength = 500): string {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new PublicError(`${label}を入力してください`);
+  }
+  const normalized = value.trim();
+  if (normalized.length > maxLength) throw new PublicError(`${label}が長すぎます`);
+  return normalized;
+}
+
+function optionalString(
+  value: unknown,
+  label: string,
+  maxLength = 500,
+): string | null {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value !== "string") throw new PublicError(`${label}の形式が不正です`);
+  const normalized = value.trim();
+  if (normalized.length > maxLength) throw new PublicError(`${label}が長すぎます`);
+  return normalized || null;
+}
+
+function positiveInteger(value: unknown, label: string, fallback: number): number {
+  if (value === null || value === undefined || value === "") return fallback;
+  const number = Number(value);
+  if (!Number.isInteger(number) || number < 100 || number > 3_600_000) {
+    throw new PublicError(`${label}は100〜3600000ミリ秒で入力してください`);
+  }
+  return number;
+}
+
+function normalizeCommand(
+  value: unknown,
+  label: string,
+  required = false,
+): string[] | null {
+  if (value === null || value === undefined || value === "") {
+    if (required) throw new PublicError(`${label}を入力してください`);
+    return null;
+  }
+  if (!Array.isArray(value) || value.length === 0) {
+    throw new PublicError(`${label}は引数の配列で入力してください`);
+  }
+  const command = value.map((item) => requiredString(item, `${label}の引数`, 2000));
+  if (command.length > 100) throw new PublicError(`${label}の引数が多すぎます`);
+  return command;
+}
+
+function normalizeLifecycle(value: unknown, directory: string | null): LifecycleDefinition {
+  if (!value || (isRecord(value) && value.strategy === "none")) return null;
+  if (!directory || !path.isAbsolute(directory)) {
+    throw new PublicError("操作を登録する場合は絶対パスの作業ディレクトリが必要です");
+  }
+  if (!isRecord(value) || (value.strategy !== "commands" && value.strategy !== "process")) {
+    throw new PublicError("操作方法はcommandsまたはprocessを選択してください");
+  }
+  if (value.strategy === "commands") {
+    return {
+      strategy: "commands",
+      start: normalizeCommand(value.start, "起動コマンド"),
+      restart: normalizeCommand(value.restart, "再起動コマンド"),
+      stop: normalizeCommand(value.stop, "停止コマンド"),
+      timeoutMs: positiveInteger(value.timeoutMs, "操作タイムアウト", 120_000),
+    };
+  }
+  return {
+    strategy: "process",
+    start: normalizeCommand(value.start, "起動コマンド", true) as string[],
+    startTimeoutMs: positiveInteger(value.startTimeoutMs, "起動タイムアウト", 30_000),
+    stopTimeoutMs: positiveInteger(value.stopTimeoutMs, "停止タイムアウト", 15_000),
+  };
+}
+
+export function parseUpstream(dial: unknown): { address: string; port: number } | null {
+  if (typeof dial !== "string") return null;
+  const value = dial.trim();
+  const ipv6 = value.match(/^\[([^\]]+)]:(\d+)$/);
+  const regular = value.match(/^([^:]+):(\d+)$/);
+  const match = ipv6 ?? regular;
+  if (!match) return null;
+  const port = Number(match[2]);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
+  return { address: match[1], port };
+}
+
+export function normalizeAppDefinition(input: unknown): AppDefinition {
+  if (!isRecord(input)) {
+    throw new PublicError("アプリ設定の形式が不正です");
+  }
+  const id = requiredString(input.id, "アプリID", 64).toLowerCase();
+  if (!/^[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?$/.test(id)) {
+    throw new PublicError("アプリIDは英小文字・数字・ハイフンで入力してください");
+  }
+  const host = requiredString(input.host, "ホスト", 253).toLowerCase();
+  if (
+    !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)*\.localhost$/.test(
+      host,
+    )
+  ) {
+    throw new PublicError("ホストはexample.localhost形式で入力してください");
+  }
+  const upstream = requiredString(input.upstream, "upstream", 300);
+  if (!parseUpstream(upstream)) {
+    throw new PublicError("upstreamはhost:port形式で入力してください");
+  }
+  const directory = optionalString(input.directory, "作業ディレクトリ", 2000);
+  if (directory && !path.isAbsolute(directory)) {
+    throw new PublicError("作業ディレクトリは絶対パスで入力してください");
+  }
+  const requiredEnvironment = Array.isArray(input.requiredEnvironment)
+    ? [
+        ...new Set(
+          input.requiredEnvironment.map((name) =>
+            requiredString(name, "環境変数名", 200),
+          ),
+        ),
+      ]
+    : [];
+  if (requiredEnvironment.some((name) => !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name))) {
+    throw new PublicError("環境変数名の形式が不正です");
+  }
+  const proxy = isRecord(input.proxy) ? input.proxy : {};
+  const headerUpHost = optionalString(proxy.headerUpHost, "転送Host", 253);
+  if (headerUpHost && /[\r\n]/.test(headerUpHost)) {
+    throw new PublicError("転送Hostの形式が不正です");
+  }
+  return {
+    id,
+    name: requiredString(input.name, "表示名", 120),
+    description: optionalString(input.description, "説明", 1000) ?? "",
+    host,
+    upstream,
+    directory,
+    requiredEnvironment,
+    lifecycle: normalizeLifecycle(input.lifecycle, directory),
+    proxy: headerUpHost ? { headerUpHost } : {},
+  };
+}
+
+export function validateConfig(config: unknown): LegacyConfig {
+  if (!isRecord(config) || config.version !== 1) {
+    throw new Error("apps.config.json の version は 1 である必要があります");
+  }
+  const dashboard = config.dashboard;
+  if (
+    !isRecord(dashboard) ||
+    typeof dashboard.host !== "string" ||
+    !dashboard.host ||
+    !Number.isInteger(dashboard.port) ||
+    (dashboard.name !== undefined && typeof dashboard.name !== "string") ||
+    (dashboard.bind !== undefined && typeof dashboard.bind !== "string") ||
+    (config.caddyAdminUrl !== undefined && typeof config.caddyAdminUrl !== "string")
+  ) {
+    throw new Error("dashboard.host と dashboard.port が必要です");
+  }
+
+  const apps = Array.isArray(config.apps) ? config.apps : [];
+  const ids = new Set<string>();
+  const hosts = new Set<string>();
+  for (const input of apps) {
+    const app = normalizeAppDefinition(input);
+    if (ids.has(app.id)) throw new Error(`アプリ ID が重複しています: ${app.id}`);
+    if (hosts.has(app.host)) throw new Error(`ホストが重複しています: ${app.host}`);
+    ids.add(app.id);
+    hosts.add(app.host);
+  }
+  return config as LegacyConfig;
+}
+
+export async function loadConfig(configPath: string): Promise<LegacyConfig> {
+  const raw = await readFile(configPath, "utf8");
+  return validateConfig(JSON.parse(raw) as unknown);
+}
+
+export function mergeAppInput(
+  current: AppDefinition,
+  input: unknown,
+  id: string,
+): Record<string, unknown> {
+  return {
+    ...current,
+    ...(isRecord(input) ? input : {}),
+    id,
+  };
+}
+
+export function requestedAppId(input: unknown): unknown {
+  return isRecord(input) ? input.id : undefined;
+}

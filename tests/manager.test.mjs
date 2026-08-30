@@ -5,6 +5,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 
 import {
@@ -14,7 +15,7 @@ import {
   mergeConfiguredApps,
   parseUpstream,
   validateConfig,
-} from "../server/core.mjs";
+} from "../dist-server/core.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -244,9 +245,9 @@ test("Localdeck の起動プロセスを呼び出し元とは別セッション�
     `import net from "node:net";\nnet.createServer(() => {}).listen(${port}, "127.0.0.1");\n`,
   );
 
-  const launcherFile = new URL("../server/start-detached.mjs", import.meta.url);
+  const launcherFile = new URL("../dist-server/start-detached.js", import.meta.url);
   const { stdout } = await execFileAsync(process.execPath, [
-    launcherFile.pathname,
+    fileURLToPath(launcherFile),
     workerFile,
     temporaryDirectory,
     logFile,

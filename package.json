@@ -7,15 +7,19 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "npm run build:client && npm run build:server",
+    "build:client": "vite build",
+    "build:server": "tsc -p tsconfig.server.json",
     "start": "bin/localdeck start",
     "local:serve": "bin/localdeck serve",
-    "local:server": "node server/index.mjs",
+    "local:server": "npm run build:server && node dist-server/index.js",
     "local:start": "bin/localdeck start",
     "local:restart": "bin/localdeck restart",
     "local:stop": "bin/localdeck stop",
     "local:status": "bin/localdeck status",
     "test": "npm run build && node --test tests/*.test.mjs",
+    "test:coverage": "npm run build && node --experimental-test-coverage --test tests/*.test.mjs",
+    "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.server.json --noEmit",
     "lint": "eslint ."
   },
   "dependencies": {
