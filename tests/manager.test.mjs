@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { execFile, spawn } from "node:child_process";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -169,6 +169,148 @@ test("process 方式は登録ディレクトリのプロセスを起動して安
 
   await executeAction(app, "stop", { appLogDirectory });
   assert.equal((await isPortOpen("127.0.0.1", port)).online, false);
+});
+
+test("Localdeck 再起動後も登録ディレクトリ配下の待受プロセスを停止できる", async (t) => {
+  const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "localdeck-subdir-test-"));
+  const childDirectory = path.join(temporaryDirectory, "apps", "web");
+  await mkdir(childDirectory, { recursive: true });
+
+  const probe = net.createServer();
+  await new Promise((resolve) => probe.listen(0, "127.0.0.1", resolve));
+  const address = probe.address();
+  assert.ok(address && typeof address === "object");
+  const port = address.port;
+  await new Promise((resolve) => probe.close(resolve));
+
+  const listenerScript = `require('node:net').createServer(() => {}).listen(${port}, '127.0.0.1')`;
+  const groupScript = `
+    const { spawn } = require('node:child_process');
+    spawn(process.execPath, ['-e', ${JSON.stringify(listenerScript)}], {
+      cwd: ${JSON.stringify(childDirectory)},
+      stdio: 'ignore',
+    });
+    setInterval(() => {}, 1000);
+  `;
+  const groupLeader = spawn(
+    process.execPath,
+    ["-e", groupScript],
+    { cwd: temporaryDirectory, detached: true, stdio: "ignore" },
+  );
+  assert.ok(groupLeader.pid);
+  let groupExited = false;
+  const groupExit = new Promise((resolve) => {
+    groupLeader.once("exit", () => {
+      groupExited = true;
+      resolve();
+    });
+  });
+  t.after(async () => {
+    if (!groupExited) {
+      try {
+        process.kill(-groupLeader.pid, "SIGTERM");
+      } catch (error) {
+        if (error?.code !== "ESRCH") throw error;
+      }
+    }
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    if ((await isPortOpen("127.0.0.1", port)).online) break;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.equal((await isPortOpen("127.0.0.1", port)).online, true);
+
+  const app = {
+    id: "test-subdir-process",
+    name: "Test Subdirectory Process",
+    host: "subdir.localhost",
+    upstream: `127.0.0.1:${port}`,
+    upstreams: [`127.0.0.1:${port}`],
+    directory: temporaryDirectory,
+    configured: true,
+    lifecycle: {
+      strategy: "process",
+      start: [process.execPath, "-e", "process.exit(0)"],
+      startTimeoutMs: 5000,
+      stopTimeoutMs: 5000,
+    },
+  };
+
+  await executeAction(app, "stop", {
+    appLogDirectory: path.join(temporaryDirectory, "localdeck-logs"),
+  });
+  assert.equal((await isPortOpen("127.0.0.1", port)).online, false);
+  await Promise.race([
+    groupExit,
+    new Promise((_, reject) =>
+      setTimeout(() => reject(new Error("プロセスグループが停止しませんでした")), 2000),
+    ),
+  ]);
+});
+
+test("process 方式は登録ディレクトリ外の待受プロセスを停止しない", async (t) => {
+  const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "localdeck-outside-test-"));
+  const registeredDirectory = path.join(temporaryDirectory, "app");
+  const outsideDirectory = path.join(temporaryDirectory, "app-other");
+  await Promise.all([
+    mkdir(registeredDirectory, { recursive: true }),
+    mkdir(outsideDirectory, { recursive: true }),
+  ]);
+
+  const probe = net.createServer();
+  await new Promise((resolve) => probe.listen(0, "127.0.0.1", resolve));
+  const address = probe.address();
+  assert.ok(address && typeof address === "object");
+  const port = address.port;
+  await new Promise((resolve) => probe.close(resolve));
+
+  const child = execFile(
+    process.execPath,
+    ["-e", `require('node:net').createServer(() => {}).listen(${port}, '127.0.0.1')`],
+    { cwd: outsideDirectory },
+  );
+  let childExited = false;
+  child.once("exit", () => {
+    childExited = true;
+  });
+  t.after(async () => {
+    if (!childExited) child.kill("SIGTERM");
+    await rm(temporaryDirectory, { recursive: true, force: true });
+  });
+
+  const deadline = Date.now() + 5000;
+  while (Date.now() < deadline) {
+    if ((await isPortOpen("127.0.0.1", port)).online) break;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.equal((await isPortOpen("127.0.0.1", port)).online, true);
+
+  const app = {
+    id: "test-outside-process",
+    name: "Test Outside Process",
+    host: "outside.localhost",
+    upstream: `127.0.0.1:${port}`,
+    upstreams: [`127.0.0.1:${port}`],
+    directory: registeredDirectory,
+    configured: true,
+    lifecycle: {
+      strategy: "process",
+      start: [process.execPath, "-e", "process.exit(0)"],
+      startTimeoutMs: 5000,
+      stopTimeoutMs: 5000,
+    },
+  };
+
+  await assert.rejects(
+    executeAction(app, "stop", {
+      appLogDirectory: path.join(temporaryDirectory, "localdeck-logs"),
+    }),
+    /登録ディレクトリ配下ではない/,
+  );
+  assert.equal((await isPortOpen("127.0.0.1", port)).online, true);
 });
 
 test("process 方式の起動直後エラーは起動待ちを残さない", async (t) => {

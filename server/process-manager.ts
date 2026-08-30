@@ -164,6 +164,25 @@ async function processUptime(pid: number): Promise<string | null> {
   }
 }
 
+async function processGroupId(pid: number): Promise<number | null> {
+  try {
+    const result = await runCommand(
+      ["lsof", "-a", "-p", String(pid), "-d", "cwd", "-Fpg"],
+      { timeoutMs: 3000 },
+    );
+    const value = result.output
+      .split("\n")
+      .find((line) => line.startsWith("g"))
+      ?.slice(1);
+    if (!value) return null;
+    if (!/^\d+$/.test(value)) return null;
+    const processGroup = Number(value);
+    return Number.isInteger(processGroup) && processGroup > 1 ? processGroup : null;
+  } catch {
+    return null;
+  }
+}
+
 async function normalizedRealpath(value: string | null): Promise<string | null> {
   if (!value) return null;
   try {
@@ -178,11 +197,30 @@ async function assertManagedPid(app: ManagedApp, pid: number): Promise<void> {
     processCwd(pid).then(normalizedRealpath),
     normalizedRealpath(app.directory),
   ]);
-  if (!actualCwd || !expectedCwd || actualCwd !== expectedCwd) {
+  const relativeCwd =
+    actualCwd && expectedCwd ? path.relative(expectedCwd, actualCwd) : null;
+  const isInsideRegisteredDirectory = Boolean(
+    relativeCwd !== null &&
+      !path.isAbsolute(relativeCwd) &&
+      relativeCwd !== ".." &&
+      !relativeCwd.startsWith(`..${path.sep}`),
+  );
+  if (!isInsideRegisteredDirectory) {
     throw new PublicError(
-      `PID ${pid} の作業ディレクトリが登録内容と一致しないため、停止を拒否しました`,
+      `PID ${pid} の作業ディレクトリが登録ディレクトリ配下ではないため、停止を拒否しました`,
       409,
     );
+  }
+}
+
+async function managedProcessGroupId(app: ManagedApp, pid: number): Promise<number | null> {
+  const processGroup = await processGroupId(pid);
+  if (!processGroup) return null;
+  try {
+    await assertManagedPid(app, processGroup);
+    return processGroup;
+  } catch {
+    return null;
   }
 }
 
@@ -228,6 +266,27 @@ async function waitForProcessExit(pid: number, timeoutMs: number): Promise<void>
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
   throw new PublicError(`PID ${pid} が停止待ち時間内に終了しませんでした`, 504);
+}
+
+async function waitForProcessGroupExit(processGroup: number, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      const result = await runCommand(
+        ["lsof", "-a", "-g", String(processGroup), "-d", "cwd", "-Fp"],
+        { timeoutMs: 3000 },
+      );
+      if (!result.output.split("\n").some((line) => /^p\d+$/.test(line))) return;
+    } catch (error) {
+      if (error instanceof PublicError) return;
+      throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 100));
+  }
+  throw new PublicError(
+    `プロセスグループ ${processGroup} が停止待ち時間内に終了しませんでした`,
+    504,
+  );
 }
 
 function ensureRequiredEnvironment(app: ManagedApp): void {
@@ -349,7 +408,7 @@ async function stopDetachedProcess(
       const current = await isPortOpen(endpoint.address, endpoint.port);
       process.kill(-managedPid, "SIGTERM");
       await Promise.all([
-        waitForProcessExit(managedPid, lifecycle.stopTimeoutMs),
+        waitForProcessGroupExit(managedPid, lifecycle.stopTimeoutMs),
         current.online
           ? waitForPort(endpoint.address, endpoint.port, false, lifecycle.stopTimeoutMs)
           : Promise.resolve(),
@@ -369,9 +428,32 @@ async function stopDetachedProcess(
   if (pids.length === 0) {
     throw new PublicError(`ポート ${endpoint.port} の PID を特定できませんでした`, 409);
   }
-  for (const pid of pids) await assertManagedPid(app, pid);
-  for (const pid of pids) process.kill(pid, "SIGTERM");
-  await waitForPort(endpoint.address, endpoint.port, false, lifecycle.stopTimeoutMs);
+  const targets = await Promise.all(
+    pids.map(async (pid) => {
+      await assertManagedPid(app, pid);
+      return { pid, processGroup: await managedProcessGroupId(app, pid) };
+    }),
+  );
+  const processGroups = [
+    ...new Set(
+      targets
+        .map((target) => target.processGroup)
+        .filter((processGroup): processGroup is number => processGroup !== null),
+    ),
+  ];
+  const standalonePids = targets
+    .filter((target) => target.processGroup === null)
+    .map((target) => target.pid);
+
+  for (const processGroup of processGroups) process.kill(-processGroup, "SIGTERM");
+  for (const pid of standalonePids) process.kill(pid, "SIGTERM");
+  await Promise.all([
+    waitForPort(endpoint.address, endpoint.port, false, lifecycle.stopTimeoutMs),
+    ...processGroups.map((processGroup) =>
+      waitForProcessGroupExit(processGroup, lifecycle.stopTimeoutMs),
+    ),
+    ...standalonePids.map((pid) => waitForProcessExit(pid, lifecycle.stopTimeoutMs)),
+  ]);
   return { message: `${app.name} を停止しました`, output: "" };
 }
 

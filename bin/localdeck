@@ -17,6 +17,7 @@ caddy_service_label=""
 caddy_service_file=""
 caddy_service_target=""
 caddy_started_here=0
+minimum_open_file_limit=65536
 
 usage() {
   cat <<EOF
@@ -28,6 +29,15 @@ Usage: bin/localdeck [start|restart|stop|status|serve]
   status   CaddyとLocaldeckの状態を表示
   serve    Caddyを起動し、管理画面をフォアグラウンド起動
 EOF
+}
+
+raise_open_file_limit() {
+  current_open_file_limit=$(ulimit -Sn 2>/dev/null || true)
+  case "$current_open_file_limit" in
+    ''|*[!0-9]*) return 0 ;;
+  esac
+  [ "$current_open_file_limit" -ge "$minimum_open_file_limit" ] || \
+    ulimit -Sn "$minimum_open_file_limit" 2>/dev/null || true
 }
 
 dashboard_healthy() {
@@ -423,6 +433,7 @@ stop_caddy() {
 }
 
 start_all() {
+  raise_open_file_limit
   start_caddy
   if ! start_dashboard; then
     [ "$caddy_started_here" -eq 0 ] || stop_caddy || true
@@ -478,6 +489,7 @@ status_all() {
 }
 
 serve_all() {
+  raise_open_file_limit
   start_caddy
   build_dashboard
   cd "$project_root"
