@@ -1,8 +1,3 @@
-/* Hallmark · macrostructure: Workbench · genre: modern-minimal
- * tone: distil · palette: Cobalt (electric-blue anchor)
- * design-system: design.md · designed-as-app
- * nav: N13 inline command · footer: Ft2 inline rule · enrichment: none
- */
 :root {
   --color-paper: oklch(98.5% 0.004 250);
   --color-paper-2: oklch(96.5% 0.006 252);
