@@ -12,7 +12,7 @@ import path from "node:path";
 
 import { DEFAULT_OPTIONS, normalizeCategory } from "./config.js";
 import { readAppLogs, readAppIcon } from "./app-assets.js";
-import { AppSupervisor } from "./supervisor.js";
+import { AppSupervisor, managed } from "./supervisor.js";
 import { createGateway, gatewayApp } from "./gateway.js";
 import { routeUpstream } from "./caddy.js";
 import {
@@ -24,6 +24,7 @@ import { errorMessage, errorStatus, PublicError } from "./errors.js";
 import {
   executeAction as defaultExecuteAction,
   inspectApp as defaultInspectApp,
+  type InspectionOptions,
 } from "./process-manager.js";
 import type {
   ActionName,
@@ -50,7 +51,10 @@ const mimeTypes: Record<string, string> = {
 
 type FetchCaddyState = (config: LocaldeckConfig) => Promise<CaddyState>;
 type SyncCaddyConfig = (config: LocaldeckConfig) => Promise<unknown>;
-type InspectApp = (app: ManagedApp) => Promise<InspectedApp>;
+type InspectApp = (
+  app: ManagedApp,
+  options?: InspectionOptions,
+) => Promise<InspectedApp>;
 type ExecuteAction = (
   app: ManagedApp,
   action: ActionName,
@@ -312,12 +316,22 @@ export function createLocaldeckApplication(
     }
 
     const assetMatch = pathname.match(
-      /^\/api\/apps\/([a-z0-9-]+)\/(logs|favicon)$/,
+      /^\/api\/apps\/([a-z0-9-]+)\/(logs|favicon|details)$/,
     );
     if (request.method === "GET" && assetMatch) {
       const app = store.getApp(assetMatch[1]);
       if (!app) throw new PublicError("アプリが見つかりません", 404);
-      if (assetMatch[2] === "logs") {
+      if (assetMatch[2] === "details") {
+        const view = await supervisor.inspect(managed(app), {
+          includeProcessDetails: true,
+        });
+        sendJson(response, 200, {
+          pid: view.pid,
+          uptime: view.uptime,
+          processes: view.runtime?.processes ?? [],
+          checkedAt: now().toISOString(),
+        });
+      } else if (assetMatch[2] === "logs") {
         const source =
           new URL(request.url!, "http://localhost").searchParams.get(
             "source",

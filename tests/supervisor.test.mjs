@@ -719,3 +719,18 @@ test("Caddy synchronization failures keep the started process running and surfac
   assert.equal(f.online.has("notes"), true);
   assert.equal(f.store.getRuntime("notes").phase, "running");
 });
+
+test("gateway traffic and idle checks use TCP health without PID or uptime scans", async (t) => {
+  const inspections = [];
+  const f = await fixture(t, { wakeOnRequest: true, idleStopMinutes: 1, requestOnlyIdle: true }, {
+    inspect: async (app, options) => {
+      inspections.push(options);
+      return { ...app, status: "online", port: Number(app.upstream.split(":").at(-1)), pid: null, definition: app, actions: {} };
+    },
+  });
+  for (let request = 0; request < 50; request++) await f.supervisor.wake("notes");
+  await f.supervisor.inspect(managed(f.store.getApp("notes")), { includeProcessDetails: false });
+  f.advance(120_000); await f.supervisor.maintain();
+  assert.ok(inspections.length >= 52);
+  assert.ok(inspections.every((options) => options?.includeProcessDetails === false));
+});

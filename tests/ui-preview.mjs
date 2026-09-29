@@ -135,6 +135,18 @@ const server = http.createServer(async (request, response) => {
       response.end();
       return;
     }
+    if (url.pathname.endsWith("/details")) {
+      const app = snapshot().apps.find(
+        (app) => app.id === url.pathname.split("/")[3],
+      );
+      json({
+        pid: app?.pid ?? null,
+        uptime: app?.uptime ?? null,
+        processes: app?.runtime.processes ?? [],
+        checkedAt: new Date().toISOString(),
+      });
+      return;
+    }
     if (url.pathname.endsWith("/logs")) {
       json({
         text: "[UI preview fixture]\nVITE ready in 218 ms\nLocal server ready\nGET /api/health 200\n",

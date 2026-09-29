@@ -19,6 +19,7 @@ const DEFAULT_CONNECT_TIMEOUT_MS = 700;
 const DEFAULT_COMMAND_TIMEOUT_MS = 120_000;
 const MAX_COMMAND_OUTPUT = 12_000;
 const managedProcessGroups = new Map<string, number>();
+export type InspectionOptions = { includeProcessDetails?: boolean };
 
 type PortStatus = {
   online: boolean;
@@ -652,7 +653,10 @@ function appDefinition(app: ManagedApp): AppDefinition {
   };
 }
 
-export async function inspectApp(app: ManagedApp): Promise<InspectedApp> {
+export async function inspectApp(
+  app: ManagedApp,
+  options: InspectionOptions = {},
+): Promise<InspectedApp> {
   const endpoint = parseUpstream(app.upstreams[0] ?? app.upstream);
   if (!endpoint) {
     return {
@@ -671,7 +675,12 @@ export async function inspectApp(app: ManagedApp): Promise<InspectedApp> {
   }
 
   const status = await isPortOpen(endpoint.address, endpoint.port);
-  const pids = status.online ? await listenerPids(endpoint.port) : [];
+  // Normal monitoring needs only TCP health. Expensive OS process queries are
+  // explicitly requested by the details endpoint, never by the dashboard poll.
+  const pids =
+    status.online && options.includeProcessDetails === true
+      ? await listenerPids(endpoint.port)
+      : [];
   const pid = pids[0] ?? null;
   const uptime = pid ? await processUptime(pid) : null;
   return {

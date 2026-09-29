@@ -1484,4 +1484,27 @@ textarea.log-output {
   font-size: 10px;
 }
 
-@media (max-width: 620px) { .sidebar { visibility: hidden; left: 0; } .sidebar.mobile-open { visibility: visible; } }
+@media (max-width: 620px) {
+  .sidebar {
+    visibility: hidden;
+    left: 0;
+  }
+  .sidebar.mobile-open {
+    visibility: visible;
+  }
+}
+
+.process-heading {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+.process-heading h3 {
+  margin: 0;
+}
+.process-checked {
+  color: var(--muted);
+  font-size: 10px;
+  margin: 5px 0 12px;
+}

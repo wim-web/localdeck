@@ -1,5 +1,10 @@
 import { useEffect, useRef, useState } from "react";
-import { fetchLogs } from "../localdeck-api";
+import {
+  fetchLogs,
+  fetchProcessDetails,
+  type ProcessDetails,
+} from "../localdeck-api";
+import { formatCheckedAt } from "../formatters";
 import { commandToText } from "../app-form";
 import type { LocalApp } from "../localdeck-types";
 import { Icon } from "./icon";
@@ -22,6 +27,29 @@ export function AppInspector({
   const [copied, setCopied] = useState(false);
   const [refresh, setRefresh] = useState(0);
   const logRef = useRef<HTMLTextAreaElement>(null);
+  const [details, setDetails] = useState<ProcessDetails | null>(null);
+  const [detailsError, setDetailsError] = useState<string | null>(null);
+  const [detailsRefresh, setDetailsRefresh] = useState(0);
+  useEffect(() => {
+    if (tab !== "details") return;
+    const controller = new AbortController();
+    void fetchProcessDetails(app.id, controller.signal)
+      .then((result) => {
+        if (!controller.signal.aborted) {
+          setDetails(result);
+          setDetailsError(null);
+        }
+      })
+      .catch((error: unknown) => {
+        if (!controller.signal.aborted)
+          setDetailsError(
+            error instanceof Error
+              ? error.message
+              : "プロセス情報を取得できませんでした",
+          );
+      });
+    return () => controller.abort();
+  }, [app.id, tab, detailsRefresh]);
   useEffect(() => {
     if (tab !== "logs") return;
     const controller = new AbortController();
@@ -84,8 +112,31 @@ export function AppInspector({
             </div>
           )}
           <div className="process-list">
-            <h3>プロセス</h3>
+            <div className="process-heading">
+              <h3>プロセス</h3>
+              <button
+                className="button quiet"
+                type="button"
+                onClick={() => setDetailsRefresh((value) => value + 1)}
+              >
+                <Icon name="refresh" size={14} />
+                情報を再取得
+              </button>
+            </div>
+            <p className="process-checked">
+              {details
+                ? `${formatCheckedAt(details.checkedAt)} に取得`
+                : detailsError
+                  ? "情報を取得できませんでした"
+                  : "情報を取得中…"}
+            </p>
+            {detailsError && (
+              <p className="inline-error" role="alert">
+                {detailsError}
+              </p>
+            )}
             {(
+              details?.processes ??
               app.runtime?.processes ?? [
                 {
                   id: "main",
@@ -148,7 +199,7 @@ export function AppInspector({
             </div>
             <div>
               <dt>稼働時間</dt>
-              <dd>{app.uptime ?? "—"}</dd>
+              <dd>{details?.uptime ?? "—"}</dd>
             </div>
             <div>
               <dt>アクセス時に起動</dt>

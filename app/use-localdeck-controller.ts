@@ -20,7 +20,7 @@ import type {
 } from "./localdeck-types";
 import { SnapshotRequestGate } from "./snapshot-request-gate";
 
-const REFRESH_INTERVAL_MS = 2_000;
+const REFRESH_INTERVAL_MS = 5_000;
 const DELETE_DELAY_MS = 8_000;
 const COPY_NOTICE_MS = 1_800;
 

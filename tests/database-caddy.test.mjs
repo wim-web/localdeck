@@ -703,3 +703,28 @@ test("runtimeが初期化中のsignalをPID記録後に安全に処理する", a
   await runtime.shutdown("TEST AGAIN");
   assert.equal(closeCount, 1);
 });
+
+test("dashboard polling never requests process metadata; the details endpoint requests it only on demand", async (t) => {
+  let detailsReads = 0;
+  const fixture = await createHttpFixture(t, {
+    inspectApp: async (app, options) => {
+      const details = options?.includeProcessDetails === true;
+      if (details) detailsReads++;
+      return { ...inspectedApp(app), status: "online", port: 9000, pid: details ? 12345 : null, uptime: details ? "01:23" : null };
+    },
+  });
+  for (let poll = 0; poll < 10; poll++) {
+    const response = await fetch(`${fixture.baseUrl}/api/apps`);
+    assert.equal((await response.json()).apps[0].pid, null);
+  }
+  assert.equal(detailsReads, 0);
+  const response = await fetch(`${fixture.baseUrl}/api/apps/example/details`);
+  const details = await response.json();
+  assert.equal(details.pid, 12345); assert.equal(details.uptime, "01:23");
+  assert.equal(details.processes[0].pid, 12345); assert.ok(details.checkedAt);
+  assert.equal(detailsReads, 1);
+  for (let poll = 0; poll < 10; poll++) await (await fetch(`${fixture.baseUrl}/api/apps`)).json();
+  assert.equal(detailsReads, 1);
+  const missing = await fetch(`${fixture.baseUrl}/api/apps/missing/details`);
+  assert.equal(missing.status, 404);
+});

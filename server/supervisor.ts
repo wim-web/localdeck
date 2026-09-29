@@ -2,6 +2,7 @@ import net from "node:net";
 import http from "node:http";
 import { DEFAULT_OPTIONS, parseUpstream } from "./config.js";
 import { PublicError, errorMessage } from "./errors.js";
+import type { InspectionOptions } from "./process-manager.js";
 import type {
   ActionName,
   ActionResult,
@@ -18,7 +19,10 @@ export type Execute = (
   action: ActionName,
   options: { appLogDirectory: string; environment?: NodeJS.ProcessEnv },
 ) => Promise<ActionResult>;
-export type Inspect = (app: ManagedApp) => Promise<InspectedApp>;
+export type Inspect = (
+  app: ManagedApp,
+  options?: InspectionOptions,
+) => Promise<InspectedApp>;
 export function managed(app: AppDefinition): ManagedApp {
   return {
     ...app,
@@ -209,12 +213,18 @@ export class AppSupervisor {
     this.states.set(id, state);
     this.dependencies.store.setRuntime?.(id, state);
   }
-  async inspect(app: ManagedApp): Promise<InspectedApp> {
-    const main = await this.dependencies.inspect(app);
+  async inspect(
+    app: ManagedApp,
+    inspectionOptions: InspectionOptions = { includeProcessDetails: false },
+  ): Promise<InspectedApp> {
+    const main = await this.dependencies.inspect(app, inspectionOptions);
     const children = await Promise.all(
       (app.options?.backends ?? []).map(async (backend) => ({
         backend,
-        view: await this.dependencies.inspect(backendApp(app, backend)),
+        view: await this.dependencies.inspect(
+          backendApp(app, backend),
+          inspectionOptions,
+        ),
       })),
     );
     const processes = [
@@ -314,7 +324,9 @@ export class AppSupervisor {
     }
     const app = this.dependencies.store.getApp(id);
     if (!app) throw new PublicError("アプリが見つかりません", 404);
-    const view = await this.dependencies.inspect(managed(app));
+    const view = await this.dependencies.inspect(managed(app), {
+      includeProcessDetails: false,
+    });
     if (view.status === "online") return;
     if (!app.options?.wakeOnRequest)
       throw new PublicError(
@@ -416,7 +428,10 @@ export class AppSupervisor {
         ...app.options.backends.map((b) => backendApp(app!, b)),
       ];
       for (const target of previousTargets)
-        if ((await inspect(target)).status === "online")
+        if (
+          (await inspect(target, { includeProcessDetails: false })).status ===
+          "online"
+        )
           throw new PublicError(`${target.name} はすでに起動しています`, 409);
       const endpoint = parseUpstream(app.upstream)!;
       const mainLease = await reserve(
@@ -540,7 +555,10 @@ export class AppSupervisor {
           options.idleStopMinutes * 60_000
       )
         continue;
-      if ((await this.inspect(managed(app))).runtime?.phase !== "running")
+      if (
+        (await this.inspect(managed(app), { includeProcessDetails: false }))
+          .runtime?.phase !== "running"
+      )
         continue;
       let mayStop = options.requestOnlyIdle;
       if (options.activityPath) {

@@ -94,3 +94,18 @@ export async function fetchLogs(
     ),
   );
 }
+
+export type ProcessDetails = {
+  pid: number | null;
+  uptime: string | null;
+  processes: import("../server/types").ProcessView[];
+  checkedAt: string;
+};
+export async function fetchProcessDetails(
+  appId: string,
+  signal?: AbortSignal,
+): Promise<ProcessDetails> {
+  return readJson(
+    await fetch(`/api/apps/${appId}/details`, { signal, cache: "no-store" }),
+  );
+}
