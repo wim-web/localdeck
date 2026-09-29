@@ -1,3 +1,4 @@
+import { usesGateway } from "./supervisor.js";
 import { extractCaddyRoutes } from "./caddy-routes.js";
 import { errorMessage } from "./errors.js";
 import type { CaddyState, LocaldeckConfig } from "./types.js";
@@ -33,12 +34,18 @@ function renderSite(
         "\t}",
       ]
     : [`\treverse_proxy ${caddyToken(upstream)}`];
-  return [
-    `${caddyToken(host)} {`,
-    "\ttls internal",
-    ...proxyLines,
-    "}",
-  ].join("\n");
+  return [`${caddyToken(host)} {`, "\ttls internal", ...proxyLines, "}"].join(
+    "\n",
+  );
+}
+
+export function routeUpstream(
+  config: LocaldeckConfig,
+  app: LocaldeckConfig["apps"][number],
+): string {
+  return usesGateway(app)
+    ? `${config.dashboard.bind}:${config.dashboard.port}`
+    : app.upstream;
 }
 
 export function renderCaddyfile(config: LocaldeckConfig): string {
@@ -49,12 +56,22 @@ export function renderCaddyfile(config: LocaldeckConfig): string {
       config.dashboard.host,
       `${config.dashboard.bind}:${config.dashboard.port}`,
     ),
-    ...config.apps.map((app) => renderSite(app.host, app.upstream, app.proxy)),
+    ...config.apps.map((app) =>
+      renderSite(
+        app.host,
+        routeUpstream(config, app),
+        usesGateway(app) ? {} : app.proxy,
+      ),
+    ),
   ];
-  return ["{", `\tadmin ${adminAddress}`, "}", "", sites.join("\n\n"), ""].join("\n");
+  return ["{", `\tadmin ${adminAddress}`, "}", "", sites.join("\n\n"), ""].join(
+    "\n",
+  );
 }
 
-export async function fetchCaddyState(config: LocaldeckConfig): Promise<CaddyState> {
+export async function fetchCaddyState(
+  config: LocaldeckConfig,
+): Promise<CaddyState> {
   const startedAt = performance.now();
   try {
     const response = await fetch(adminUrl(config, "/config/"), {
@@ -62,7 +79,7 @@ export async function fetchCaddyState(config: LocaldeckConfig): Promise<CaddySta
       signal: AbortSignal.timeout(1500),
     });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    const raw = await response.json() as unknown;
+    const raw = (await response.json()) as unknown;
     return {
       connected: true,
       routes: extractCaddyRoutes(raw),

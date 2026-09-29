@@ -117,3 +117,15 @@ test("自動更新の多重起動とコマンド選択の競合を防ぐ", async
   assert.equal(commands.some((command) => command.id.startsWith("example-")), false);
   assert.equal(commands.find((command) => command.id === "other-delete").disabled, true);
 });
+
+test("commands and multi-process settings round-trip through the editor", async (t) => {
+  const vite = await createViteServer({ root: fileURLToPath(new URL("..", import.meta.url)), server: { middlewareMode: true }, appType: "custom", logLevel: "silent" });
+  t.after(() => vite.close());
+  const { commandToText, textToCommand, definitionToForm, formToDefinition } = await vite.ssrLoadModule("/app/app-form.ts");
+  const command = ["node", "/a path/server.js", "--label", 'a "quoted" value', "--port", "{port}"];
+  assert.deepEqual(textToCommand(commandToText(command)), command);
+  assert.throws(() => textToCommand('node "unclosed'), /引用符/);
+  const app = { id: "test", name: "Test", description: "", host: "test.localhost", upstream: "127.0.0.1:5000", directory: "/tmp", requiredEnvironment: ["API_KEY"], lifecycle: { strategy: "process", start: command, startTimeoutMs: 30000, stopTimeoutMs: 15000 }, proxy: {},
+    options: { categoryId: "tools", port: { mode: "auto", environment: "WEB_PORT" }, environment: { API_URL: "http://127.0.0.1:{backendPort:api}" }, backends: [{ id: "api", name: "API", directory: "/tmp/api", start: ["node", "index.js"], port: 8080, portSettings: { mode: "auto", environment: "PORT" }, environment: { DEBUG: "yes" } }], wakeOnRequest: true, idleStopMinutes: 10, activityPath: "/activity", requestOnlyIdle: false, keepAlive: true } };
+  assert.deepEqual(formToDefinition(definitionToForm(app)), app);
+});

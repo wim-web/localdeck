@@ -1,11 +1,36 @@
+import { useMemo, useState, useEffect } from "react";
+import type { DragEvent } from "react";
 import { AppEditor } from "./components/app-editor";
-import { AppRow } from "./components/app-row";
+import { AppCard, appPhase } from "./components/app-card";
+import { AppInspector } from "./components/app-inspector";
+import { CategoryEditor } from "./components/category-editor";
 import { CommandPalette } from "./components/command-palette";
+import { Icon } from "./components/icon";
+import type { IconName } from "./components/icon";
 import { createCommandItems } from "./command-items";
-import { formatCheckedAt } from "./formatters";
 import { useLocaldeckController } from "./use-localdeck-controller";
+import type { Category, LocalApp } from "./localdeck-types";
 
+const filters: { id: string; label: string; icon: IconName }[] = [
+  { id: "all", label: "すべてのアプリ", icon: "grid" },
+  { id: "running", label: "稼働中", icon: "play" },
+  { id: "waiting", label: "待ち受け", icon: "moon" },
+  { id: "stopped", label: "停止中", icon: "stop" },
+  { id: "error", label: "エラー", icon: "alert" },
+];
+function matches(app: LocalApp, filter: string): boolean {
+  const phase = appPhase(app);
+  if (filter === "all") return true;
+  if (filter === "waiting")
+    return (
+      phase === "stopped" && Boolean(app.definition.options?.wakeOnRequest)
+    );
+  if (filter === "stopped")
+    return phase === "stopped" && !app.definition.options?.wakeOnRequest;
+  return phase === filter;
+}
 export default function Home() {
+  const controller = useLocaldeckController();
   const {
     snapshot,
     loading,
@@ -13,13 +38,11 @@ export default function Home() {
     error,
     notice,
     autoRefresh,
-    copied,
     editorMode,
     form,
     saving,
     commandOpen,
     pendingDelete,
-    healthLabel,
     visibleApps,
     busyAppIds,
     loadSnapshot,
@@ -37,8 +60,55 @@ export default function Home() {
     openCommandPalette,
     closeCommandPalette,
     clearNotice,
-  } = useLocaldeckController();
-
+    mutate,
+  } = controller;
+  const [filter, setFilter] = useState("all");
+  const [categoryId, setCategoryId] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [inspector, setInspector] = useState<{
+    id: string;
+    tab: "details" | "logs";
+  } | null>(null);
+  const [categoryEditor, setCategoryEditor] = useState<{
+    category: Category | null;
+  } | null>(null);
+  const [mobileNav, setMobileNav] = useState(false);
+  const [theme, setTheme] = useState(() =>
+    typeof window === "undefined"
+      ? "light"
+      : (localStorage.getItem("localdeck-theme") ??
+        (window.matchMedia("(prefers-color-scheme: dark)").matches
+          ? "dark"
+          : "light")),
+  );
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem("localdeck-theme", theme);
+  }, [theme]);
+  const categories = snapshot?.categories ?? [];
+  const selectedCategory = categories.find((c) => c.id === categoryId);
+  const filtered = useMemo(
+    () =>
+      visibleApps.filter((app) => {
+        if (
+          categoryId !== null &&
+          (app.definition.options?.categoryId ?? "") !== categoryId
+        )
+          return false;
+        if (!matches(app, filter)) return false;
+        const haystack = [
+          app.name,
+          app.description,
+          app.host,
+          app.directory,
+          app.definition.lifecycle?.start?.join(" "),
+        ]
+          .join(" ")
+          .toLocaleLowerCase();
+        return haystack.includes(query.toLocaleLowerCase().trim());
+      }),
+    [visibleApps, categoryId, filter, query],
+  );
   const commands = createCommandItems({
     snapshot,
     refreshing,
@@ -54,248 +124,397 @@ export default function Home() {
     onAction: (app, action) => void handleAction(app, action),
     onDelete: handleDeleteApp,
   });
-
+  async function move(app: LocalApp, offset: number) {
+    const target =
+      filtered[filtered.findIndex((item) => item.id === app.id) + offset];
+    if (!target) return;
+    await reorder(app.id, target.id);
+  }
+  async function reorder(source: string, target: string) {
+    const ids = visibleApps.map((app) => app.id);
+    const index = ids.indexOf(source),
+      targetIndex = ids.indexOf(target);
+    if (index < 0 || targetIndex < 0 || index === targetIndex || pendingDelete)
+      return;
+    ids.splice(index, 1);
+    ids.splice(targetIndex, 0, source);
+    await mutate("/api/apps/reorder", { ids });
+  }
+  function drop(event: DragEvent, target: LocalApp) {
+    event.preventDefault();
+    void reorder(event.dataTransfer.getData("text/localdeck-app"), target.id);
+  }
+  const inspectedApp = snapshot?.apps.find((app) => app.id === inspector?.id);
+  const title =
+    categoryId === ""
+      ? "未分類"
+      : (selectedCategory?.name ??
+        filters.find((item) => item.id === filter)?.label ??
+        "すべてのアプリ");
   return (
-    <>
-      <main className="workbench" id="app-workbench">
-        <header className="topbar" id="top">
-          <a className="brand" href="#top" aria-label="Localdeck トップ">
-            <span className="brand-signal" aria-hidden="true">L/</span>
-            <span className="brand-copy">
-              <strong>LOCALDECK</strong>
-              <small>LOCAL APP CONTROL</small>
-            </span>
-          </a>
-
-          <div className="topbar-actions">
-            <button
-              className="button command-trigger"
-              type="button"
-              onClick={openCommandPalette}
-              aria-haspopup="dialog"
-              aria-expanded={commandOpen}
-            >
-              <span>コマンド</span>
-              <kbd>⌘K</kbd>
-            </button>
-            <label className="auto-refresh">
-              <input
-                type="checkbox"
-                checked={autoRefresh}
-                onChange={(event) => setAutoRefreshEnabled(event.target.checked)}
-              />
-              <span className="switch-track" aria-hidden="true" />
-              <span className="switch-label">自動更新</span>
-            </label>
-            <button
-              className="button refresh-button"
-              type="button"
-              onClick={() => void loadSnapshot(false)}
-              disabled={refreshing}
-              aria-busy={refreshing}
-              data-state={refreshing ? "loading" : "default"}
-            >
-              <span className="refresh-glyph" aria-hidden="true">↻</span>
-              {refreshing ? "更新中" : "更新"}
-            </button>
-          </div>
-        </header>
-
-        <section className="workbench-overview" aria-labelledby="page-heading">
-          <div className="overview-copy">
-            <h1 id="page-heading">ローカルアプリ</h1>
-            <p>登録、Caddy route、プロセス状態を一画面で確認し、その場で操作します。</p>
-          </div>
-          <div className="health-block">
-            <div className="health-state">
-              <span
-                className={
-                  "status-dot status-dot--" +
-                  (snapshot?.summary.offline === 0 ? "online" : "offline")
-                }
-                aria-hidden="true"
-              />
-              <div>
-                <span>システム状態</span>
-                <strong>{loading ? "確認中" : healthLabel}</strong>
-              </div>
-            </div>
-            <div className="checked-at">
-              <span>最終確認</span>
-              <time dateTime={snapshot?.generatedAt}>{formatCheckedAt(snapshot?.generatedAt)}</time>
-            </div>
-          </div>
-        </section>
-
-        <section className="stat-strip" aria-label="システム概要">
-          <div>
-            <strong>{snapshot?.summary.online ?? "—"}</strong>
-            <span>稼働中</span>
-          </div>
-          <div>
-            <strong>{snapshot?.summary.offline ?? "—"}</strong>
-            <span>停止中</span>
-          </div>
-          <div>
-            <strong>{snapshot?.summary.total ?? "—"}</strong>
-            <span>登録数</span>
-          </div>
-          <div>
-            <strong>
-              {snapshot ? snapshot.caddy.routeCount + "/" + snapshot.caddy.expectedRouteCount : "—"}
-            </strong>
-            <span>Caddy routes</span>
-          </div>
-        </section>
-
-        <section className="connection-bar" aria-label="Caddy接続状態">
-          <div className="connection-state">
-            <span
-              className={
-                "status-dot status-dot--" +
-                (snapshot?.caddy.connected ? "online" : loading ? "unknown" : "offline")
-              }
-              aria-hidden="true"
-            />
-            <strong>Caddy</strong>
-            <span>{snapshot?.caddy.connected ? "接続済み" : loading ? "確認中" : "未接続"}</span>
-            {snapshot?.caddy.latencyMs !== null && snapshot?.caddy.latencyMs !== undefined && (
-              <span className="connection-latency">{snapshot.caddy.latencyMs} ms</span>
-            )}
-          </div>
-          <div className="connection-actions">
-            {snapshot?.caddy.connected && !snapshot.caddy.inSync && (
+    <div className="deck-shell">
+      <aside className={`sidebar ${mobileNav ? "mobile-open" : ""}`}>
+        <button
+          type="button"
+          className="brand"
+          onClick={() => {
+            setFilter("all");
+            setCategoryId(null);
+            setMobileNav(false);
+          }}
+        >
+          <span className="brand-mark">
+            <Icon name="grid" size={23} />
+          </span>
+          <span>
+            <strong>Localdeck</strong>
+            <small>ローカルアプリ管理</small>
+          </span>
+        </button>
+        <div className="sidebar-scroll">
+          <nav className="main-navigation" aria-label="アプリの絞り込み">
+            {filters.map((item) => (
               <button
-                className="button button--sync"
-                type="button"
-                onClick={() => void handleCaddySync()}
-                disabled={refreshing}
+                key={item.id}
+                className={`nav-item ${filter === item.id && categoryId === null ? "active" : ""}`}
+                onClick={() => {
+                  setFilter(item.id);
+                  setCategoryId(null);
+                  setMobileNav(false);
+                }}
               >
-                Routeを同期
+                <Icon name={item.icon} />
+                <span>{item.label}</span>
+                <small>
+                  {visibleApps.filter((app) => matches(app, item.id)).length}
+                </small>
               </button>
-            )}
-            <span>{autoRefresh ? "5秒ごとに更新" : "手動更新"}</span>
-          </div>
-        </section>
-
-        {error && (
-          <section className="error-banner" role="alert">
-            <div>
-              <strong>管理APIに接続できません</strong>
-              <span>{error}。サーバーの状態を確認して再試行してください。</span>
-            </div>
-            <button className="button button--error" type="button" onClick={() => void loadSnapshot(false)}>
-              再試行
-            </button>
-          </section>
-        )}
-
-        <section className="registry" aria-labelledby="apps-heading">
-          <header className="registry-heading">
-            <div>
-              <h2 id="apps-heading">アプリ一覧</h2>
-              <p>{snapshot ? snapshot.apps.length + "件を登録中" : "状態を読み込み中"}</p>
-            </div>
-            <button className="button button--register" type="button" onClick={openCreateEditor}>
-              アプリを登録
-            </button>
-          </header>
-
-          {editorMode && (
-            <AppEditor
-              form={form}
-              editing={editorMode === "edit"}
-              saving={saving}
-              onChange={updateForm}
-              onCancel={closeEditor}
-              onSubmit={(event) => void handleSaveApp(event)}
-            />
-          )}
-
-          <div className="apps-ledger" aria-busy={loading}>
-            <div className="ledger-head" aria-hidden="true">
-              <span>Application</span>
-              <span>Route</span>
-              <span>Runtime</span>
-              <span>Operations</span>
-            </div>
-
-            {visibleApps.map((app) => (
-              <AppRow
-                key={app.id}
-                app={app}
-                busy={busyAppIds.has(app.id)}
-                copied={copied}
-                deletePending={Boolean(pendingDelete)}
-                onAction={(selectedApp, action) => void handleAction(selectedApp, action)}
-                onCopy={(key, value) => void handleCopy(key, value)}
-                onEdit={openEditEditor}
-                onDelete={handleDeleteApp}
-              />
             ))}
-
-            {loading && !snapshot && (
-              <div className="loading-panel" role="status">
-                <span className="loading-indicator" aria-hidden="true" />
-                <div>
-                  <strong>SQLiteとCaddyを確認中</strong>
-                  <span>アプリとプロセスの状態を読み込んでいます。</span>
-                </div>
-              </div>
-            )}
-
-            {!loading && snapshot?.apps.length === 0 && (
-              <div className="empty-state">
-                <span className="empty-mark" aria-hidden="true">0</span>
-                <div>
-                  <strong>登録済みアプリはありません</strong>
-                  <span>最初のhost、upstream、起動方法を登録してください。</span>
-                </div>
-                <button className="button button--register" type="button" onClick={openCreateEditor}>
-                  アプリを登録
+          </nav>
+          <div className="sidebar-section-title">
+            <span>カテゴリ</span>
+            <button
+              className="icon-button small"
+              aria-label="カテゴリを追加"
+              onClick={() => setCategoryEditor({ category: null })}
+            >
+              <Icon name="plus" size={16} />
+            </button>
+          </div>
+          <nav className="category-navigation" aria-label="カテゴリ">
+            {categories.map((category) => (
+              <div className="category-nav-row" key={category.id}>
+                <button
+                  className={`nav-item ${categoryId === category.id ? "active" : ""}`}
+                  onClick={() => {
+                    setCategoryId(category.id);
+                    setFilter("all");
+                    setMobileNav(false);
+                  }}
+                >
+                  <span className={`category-dot color-${category.color}`} />
+                  <span>{category.name}</span>
+                  <small>
+                    {
+                      visibleApps.filter(
+                        (app) =>
+                          app.definition.options?.categoryId === category.id,
+                      ).length
+                    }
+                  </small>
+                </button>
+                <button
+                  className="category-edit icon-button small"
+                  aria-label={`${category.name}を編集`}
+                  onClick={() => setCategoryEditor({ category })}
+                >
+                  <Icon name="edit" size={13} />
                 </button>
               </div>
-            )}
+            ))}
+            <button
+              className={`nav-item ${categoryId === "" ? "active" : ""}`}
+              onClick={() => {
+                setCategoryId("");
+                setFilter("all");
+                setMobileNav(false);
+              }}
+            >
+              <Icon name="folder" size={17} />
+              <span>未分類</span>
+              <small>
+                {
+                  visibleApps.filter(
+                    (app) => !app.definition.options?.categoryId,
+                  ).length
+                }
+              </small>
+            </button>
+          </nav>
+        </div>
+        <div className="sidebar-bottom">
+          <div className="proxy-card">
+            <div>
+              <span
+                className={`status-dot ${snapshot?.caddy.connected ? "online" : "offline"}`}
+              />
+              <strong>リバースプロキシ</strong>
+            </div>
+            <p>HTTPS · *.localhost</p>
+            <small>
+              {snapshot?.caddy.connected
+                ? snapshot.caddy.inSync
+                  ? "すべてのルートが同期されています"
+                  : "設定の同期が必要です"
+                : "Caddyへの接続を確認してください"}
+            </small>
+            <footer>
+              <span>
+                {snapshot?.caddy.connected
+                  ? `${snapshot.caddy.routeCount} routes`
+                  : "未接続"}
+              </span>
+              <button
+                className="button quiet"
+                disabled={refreshing}
+                onClick={() => void handleCaddySync()}
+              >
+                <Icon name="refresh" size={13} />
+                同期
+              </button>
+            </footer>
           </div>
-        </section>
-
-        <footer className="footer-line">
-          <span>LOCALDECK · LOOPBACK ONLY</span>
-          <span>コマンドはシェルを介さず、登録した引数だけを実行します。</span>
-        </footer>
-
-        <div className="feedback-stack">
-          {pendingDelete && (
-            <div className="undo-notice" role="status">
-              <div>
-                <strong>{pendingDelete.app.name}を一覧から外しました</strong>
-                <span>
-                  {pendingDelete.app.status === "online"
-                    ? "8秒後に登録とrouteを削除します。プロセスは停止しません。"
-                    : "8秒後に登録とrouteを削除します。"}
-                </span>
+          <div className="sidebar-tools">
+            <button
+              className="icon-button"
+              aria-label={
+                theme === "dark"
+                  ? "ライトテーマに切り替え"
+                  : "ダークテーマに切り替え"
+              }
+              onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+            >
+              <Icon name={theme === "dark" ? "sun" : "moon"} />
+            </button>
+            <span>Local workspace</span>
+            <button
+              className="icon-button"
+              aria-label="コマンドを開く"
+              onClick={openCommandPalette}
+            >
+              <Icon name="settings" size={17} />
+            </button>
+          </div>
+        </div>
+      </aside>
+      <main className="main-panel">
+        <header className="toolbar">
+          <button
+            className="icon-button mobile-menu"
+            aria-label="メニュー"
+            aria-expanded={mobileNav}
+            onClick={() => setMobileNav(!mobileNav)}
+          >
+            <Icon name="grid" />
+          </button>
+          <div className="search-field">
+            <Icon name="search" size={19} />
+            <input
+              type="search"
+              aria-label="アプリを検索"
+              placeholder="名前・フォルダ・コマンドで探す"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+            <button
+              className="keyboard-hint"
+              onClick={openCommandPalette}
+              aria-label="コマンドパレットを開く"
+            >
+              ⌘ K
+            </button>
+          </div>
+          <button className="button primary add-app" onClick={openCreateEditor}>
+            <Icon name="plus" />
+            <span>アプリを登録</span>
+          </button>
+        </header>
+        <div className="board">
+          <header className="board-heading">
+            <div>
+              <span className="eyebrow">YOUR LOCAL WORKSPACE</span>
+              <h1>
+                {title}
+                <span>{filtered.length}</span>
+              </h1>
+              <p>起動・ログ・ローカルURLをまとめて管理。</p>
+            </div>
+            <div className="board-controls">
+              <label className="check-row">
+                <input
+                  type="checkbox"
+                  checked={autoRefresh}
+                  onChange={(event) =>
+                    setAutoRefreshEnabled(event.target.checked)
+                  }
+                />
+                自動更新
+              </label>
+              <button
+                className={`icon-button ${refreshing ? "spinning" : ""}`}
+                aria-label="状態を更新"
+                disabled={refreshing}
+                onClick={() => void loadSnapshot(false)}
+              >
+                <Icon name="refresh" />
+              </button>
+            </div>
+          </header>
+          {error && (
+            <div className="inline-error" role="alert">
+              <Icon name="alert" />
+              <p>{error}</p>
+              <button
+                className="button secondary"
+                onClick={() => void loadSnapshot(false)}
+              >
+                再試行
+              </button>
+            </div>
+          )}
+          <section
+            className="app-board"
+            aria-label="アプリ一覧"
+            aria-busy={loading}
+          >
+            {filtered.map((app, index) => (
+              <AppCard
+                key={app.id}
+                app={app}
+                checkedAt={snapshot!.generatedAt}
+                busy={busyAppIds.has(app.id)}
+                category={categories.find(
+                  (category) =>
+                    category.id === app.definition.options?.categoryId,
+                )}
+                onAction={(app, action) => void handleAction(app, action)}
+                onEdit={openEditEditor}
+                onInspect={(app, tab) => setInspector({ id: app.id, tab })}
+                onDelete={handleDeleteApp}
+                onKeepAlive={(app) =>
+                  void mutate(`/api/apps/${app.id}/keep-alive`, {
+                    enabled: !app.definition.options?.keepAlive,
+                  })
+                }
+                onMove={(app, offset) => void move(app, offset)}
+                onDragStart={(event, app) => {
+                  event.dataTransfer.setData("text/localdeck-app", app.id);
+                  event.dataTransfer.effectAllowed = "move";
+                }}
+                onDrop={drop}
+                first={index === 0}
+                last={index === filtered.length - 1}
+              />
+            ))}
+            {loading && !snapshot && (
+              <div className="empty-state">
+                <span className="spinner" />
+                <h2>ワークスペースを読み込み中</h2>
+                <p>アプリの状態を確認しています。</p>
               </div>
-              <button className="button button--undo" type="button" onClick={undoDelete}>
-                元に戻す
-              </button>
-            </div>
-          )}
-          {notice && (
-            <div className={"notice notice--" + notice.tone} role="alert">
-              <span>{notice.text}</span>
-              <button className="button button--notice-close" type="button" onClick={clearNotice}>
-                閉じる
-              </button>
-            </div>
-          )}
+            )}
+            {!loading && filtered.length === 0 && (
+              <div className="empty-state">
+                <span className="empty-icon">
+                  <Icon name={query ? "search" : "grid"} size={30} />
+                </span>
+                <h2>
+                  {visibleApps.length
+                    ? "該当するアプリがありません"
+                    : "ツールをひとつ、追加しましょう"}
+                </h2>
+                <p>
+                  {visibleApps.length
+                    ? "検索条件やカテゴリを変えてみてください。"
+                    : "起動、ログ、ローカルURLをこの場所にまとめられます。"}
+                </p>
+                {!visibleApps.length && (
+                  <button className="button primary" onClick={openCreateEditor}>
+                    <Icon name="plus" />
+                    アプリを登録
+                  </button>
+                )}
+              </div>
+            )}
+          </section>
+          <footer className="board-footer">
+            <span>
+              <span className="status-dot online" />
+              {snapshot?.summary.online ?? 0} 件が稼働中
+            </span>
+            <span>⌘ K ですばやく操作</span>
+          </footer>
         </div>
       </main>
-
-      <CommandPalette
-        open={commandOpen}
-        commands={commands}
-        onClose={closeCommandPalette}
-      />
-    </>
+      {editorMode && (
+        <AppEditor
+          form={form}
+          editing={editorMode === "edit"}
+          saving={saving}
+          error={notice?.tone === "error" ? notice.text : null}
+          categories={categories}
+          onChange={updateForm}
+          onCancel={closeEditor}
+          onSubmit={(event) => void handleSaveApp(event)}
+        />
+      )}
+      {inspector && inspectedApp && (
+        <AppInspector
+          key={inspector.id + inspector.tab}
+          app={inspectedApp}
+          initialTab={inspector.tab}
+          onClose={() => setInspector(null)}
+        />
+      )}
+      {categoryEditor && (
+        <CategoryEditor
+          category={categoryEditor.category}
+          onClose={() => setCategoryEditor(null)}
+          onSave={(category) => mutate("/api/categories", category)}
+          onDelete={(id) => mutate(`/api/categories/${id}`, {}, "DELETE")}
+        />
+      )}
+      {commandOpen && (
+        <CommandPalette
+          open
+          commands={commands}
+          onClose={closeCommandPalette}
+        />
+      )}
+      {(notice || pendingDelete) && (
+        <div
+          className={`toast ${notice?.tone ?? ""}`}
+          role={notice?.tone === "error" ? "alert" : "status"}
+        >
+          {pendingDelete ? (
+            <>
+              <span>{pendingDelete.app.name}の登録を削除します</span>
+              <button onClick={undoDelete}>取り消す</button>
+            </>
+          ) : (
+            <>
+              <span>{notice?.text}</span>
+              <button
+                className="icon-button"
+                aria-label="通知を閉じる"
+                onClick={clearNotice}
+              >
+                <Icon name="close" size={16} />
+              </button>
+            </>
+          )}
+        </div>
+      )}
+    </div>
   );
 }

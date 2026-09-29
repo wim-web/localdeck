@@ -10,7 +10,15 @@ import type {
 } from "node:http";
 import path from "node:path";
 
-import { fetchCaddyState as defaultFetchCaddyState, syncCaddyConfig as defaultSyncCaddyConfig } from "./caddy.js";
+import { DEFAULT_OPTIONS, normalizeCategory } from "./config.js";
+import { readAppLogs, readAppIcon } from "./app-assets.js";
+import { AppSupervisor } from "./supervisor.js";
+import { createGateway, gatewayApp } from "./gateway.js";
+import { routeUpstream } from "./caddy.js";
+import {
+  fetchCaddyState as defaultFetchCaddyState,
+  syncCaddyConfig as defaultSyncCaddyConfig,
+} from "./caddy.js";
 import { mergeConfiguredApps } from "./caddy-routes.js";
 import { errorMessage, errorStatus, PublicError } from "./errors.js";
 import {
@@ -63,6 +71,9 @@ export type LocaldeckHttpDependencies = {
 
 export type LocaldeckApplication = {
   requestHandler: RequestListener;
+  upgrade?: ReturnType<typeof createGateway>["upgrade"];
+  maintain?(): Promise<void>;
+  dispose?(): void | Promise<void>;
   snapshot(): Promise<Snapshot>;
   synchronizeCaddy(): Promise<void>;
   reconcileCaddyIfNeeded(): Promise<void>;
@@ -80,14 +91,28 @@ function securityHeaders(contentType: string): OutgoingHttpHeaders {
   };
 }
 
-function sendJson(response: ServerResponse, status: number, body: unknown): void {
-  response.writeHead(status, securityHeaders("application/json; charset=utf-8"));
+function sendJson(
+  response: ServerResponse,
+  status: number,
+  body: unknown,
+): void {
+  response.writeHead(
+    status,
+    securityHeaders("application/json; charset=utf-8"),
+  );
   response.end(JSON.stringify(body));
 }
 
-export function caddyIsInSync(caddy: CaddyState, config: LocaldeckConfig): boolean {
-  const dashboardRoute = caddy.routes.find((route) => route.host === config.dashboard.host);
-  const managedRoutes = caddy.routes.filter((route) => route.host !== config.dashboard.host);
+export function caddyIsInSync(
+  caddy: CaddyState,
+  config: LocaldeckConfig,
+): boolean {
+  const dashboardRoute = caddy.routes.find(
+    (route) => route.host === config.dashboard.host,
+  );
+  const managedRoutes = caddy.routes.filter(
+    (route) => route.host !== config.dashboard.host,
+  );
   return Boolean(
     caddy.connected &&
       dashboardRoute?.upstreams.includes(
@@ -96,7 +121,9 @@ export function caddyIsInSync(caddy: CaddyState, config: LocaldeckConfig): boole
       managedRoutes.length === config.apps.length &&
       config.apps.every((app) =>
         caddy.routes.some(
-          (route) => route.host === app.host && route.upstreams.includes(app.upstream),
+          (route) =>
+            route.host === app.host &&
+            route.upstreams.includes(routeUpstream(config, app)),
         ),
       ),
   );
@@ -116,7 +143,15 @@ export function createLocaldeckApplication(
     now = () => new Date(),
     logger = console,
   } = dependencies;
-  const actionLocks = new Set<string>();
+  const supervisor = new AppSupervisor({
+    store,
+    inspect: inspectApp,
+    execute: executeAction,
+    appLogDirectory,
+    synchronize: synchronizeCaddy,
+    now,
+  });
+  const gateway = createGateway(store, supervisor);
   let syncQueue: Promise<void> = Promise.resolve();
 
   function synchronizeCaddy(): Promise<void> {
@@ -130,15 +165,20 @@ export function createLocaldeckApplication(
   async function reconcileCaddyIfNeeded(): Promise<void> {
     const config = store.getConfig();
     const caddy = await fetchCaddyState(config);
-    if (caddy.connected && !caddyIsInSync(caddy, config)) await synchronizeCaddy();
+    if (caddy.connected && !caddyIsInSync(caddy, config))
+      await synchronizeCaddy();
   }
 
   async function snapshot(): Promise<Snapshot> {
     const config = store.getConfig();
     const caddy = await fetchCaddyState(config);
     const merged = mergeConfiguredApps(caddy.routes, config);
-    const apps = await Promise.all(merged.map(inspectApp));
-    const online = apps.filter((app) => app.status === "online").length;
+    const apps = await Promise.all(
+      merged.map((app) => supervisor.inspect(app)),
+    );
+    const online = apps.filter(
+      (app) => app.runtime?.phase === "running",
+    ).length;
     const managedRoutes = caddy.routes.filter(
       (route) => route.host !== config.dashboard.host,
     );
@@ -146,6 +186,7 @@ export function createLocaldeckApplication(
 
     return {
       generatedAt: now().toISOString(),
+      categories: store.listCategories?.() ?? [],
       caddy: {
         connected: caddy.connected,
         routeCount: managedRoutes.length,
@@ -177,7 +218,10 @@ export function createLocaldeckApplication(
         "127.0.0.1",
         "[::1]",
       ]);
-      return ["http:", "https:"].includes(url.protocol) && allowedHosts.has(url.hostname);
+      return (
+        ["http:", "https:"].includes(url.protocol) &&
+        allowedHosts.has(url.hostname)
+      );
     } catch {
       return false;
     }
@@ -187,9 +231,12 @@ export function createLocaldeckApplication(
     const chunks: Buffer[] = [];
     let size = 0;
     for await (const chunk of request) {
-      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as string);
+      const buffer = Buffer.isBuffer(chunk)
+        ? chunk
+        : Buffer.from(chunk as string);
       size += buffer.length;
-      if (size > 64 * 1024) throw new PublicError("リクエストが大きすぎます", 413);
+      if (size > 64 * 1024)
+        throw new PublicError("リクエストが大きすぎます", 413);
       chunks.push(buffer);
     }
     if (chunks.length === 0) throw new PublicError("アプリ設定がありません");
@@ -213,7 +260,9 @@ export function createLocaldeckApplication(
     }
     sendJson(response, status, {
       ok: true,
-      message: warning ? `${message}。ただしCaddyへの反映に失敗しました` : message,
+      message: warning
+        ? `${message}。ただしCaddyへの反映に失敗しました`
+        : message,
       warning,
       snapshot: await snapshot(),
     } satisfies ActionResponse);
@@ -262,16 +311,165 @@ export function createLocaldeckApplication(
       return true;
     }
 
+    const assetMatch = pathname.match(
+      /^\/api\/apps\/([a-z0-9-]+)\/(logs|favicon)$/,
+    );
+    if (request.method === "GET" && assetMatch) {
+      const app = store.getApp(assetMatch[1]);
+      if (!app) throw new PublicError("アプリが見つかりません", 404);
+      if (assetMatch[2] === "logs") {
+        const source =
+          new URL(request.url!, "http://localhost").searchParams.get(
+            "source",
+          ) ?? "main";
+        sendJson(
+          response,
+          200,
+          await readAppLogs(app, appLogDirectory, source),
+        );
+      } else {
+        const icon = await readAppIcon(app);
+        if (!icon) {
+          response.writeHead(404);
+          response.end();
+        } else {
+          response.writeHead(200, {
+            ...securityHeaders(icon.type),
+            "Cache-Control": "private, max-age=300",
+            "Content-Security-Policy": "default-src 'none'; sandbox",
+          });
+          response.end(icon.body);
+        }
+      }
+      return true;
+    }
+    if (pathname === "/api/apps/reorder" && request.method === "POST") {
+      if (!trustedMutationRequest(request))
+        throw new PublicError("この操作リクエストは許可されていません", 403);
+      const body = (await readJsonBody(request)) as { ids?: unknown } | null;
+      if (
+        !Array.isArray(body?.ids) ||
+        !body.ids.every((id) => typeof id === "string")
+      )
+        throw new PublicError("並べ替えの形式が不正です");
+      store.reorderApps?.(body.ids);
+      sendJson(response, 200, {
+        ok: true,
+        message: "並び順を保存しました",
+        snapshot: await snapshot(),
+      });
+      return true;
+    }
+    if (pathname === "/api/categories" && request.method === "POST") {
+      if (!trustedMutationRequest(request))
+        throw new PublicError("この操作リクエストは許可されていません", 403);
+      store.saveCategory?.(normalizeCategory(await readJsonBody(request)));
+      sendJson(response, 200, {
+        ok: true,
+        message: "カテゴリを保存しました",
+        snapshot: await snapshot(),
+      });
+      return true;
+    }
+    const categoryMatch = pathname.match(/^\/api\/categories\/([a-z0-9-]+)$/);
+    if (categoryMatch && request.method === "DELETE") {
+      if (!trustedMutationRequest(request))
+        throw new PublicError("この操作リクエストは許可されていません", 403);
+      if (store.listApps().some((app) => supervisor.busy(app.id)))
+        throw new PublicError(
+          "アプリの操作が完了してからカテゴリを削除してください",
+          409,
+        );
+      store.deleteCategory?.(categoryMatch[1]);
+      sendJson(response, 200, {
+        ok: true,
+        message: "カテゴリを削除しました",
+        snapshot: await snapshot(),
+      });
+      return true;
+    }
+    const keepAliveMatch = pathname.match(
+      /^\/api\/apps\/([a-z0-9-]+)\/keep-alive$/,
+    );
+    if (keepAliveMatch && request.method === "POST") {
+      if (!trustedMutationRequest(request))
+        throw new PublicError("この操作リクエストは許可されていません", 403);
+      if (supervisor.busy(keepAliveMatch[1]))
+        throw new PublicError("このアプリは別の操作を実行中です", 409);
+      const app = store.getApp(keepAliveMatch[1]);
+      if (!app) throw new PublicError("アプリが見つかりません", 404);
+      const body = (await readJsonBody(request)) as {
+        enabled?: unknown;
+      } | null;
+      if (typeof body?.enabled !== "boolean")
+        throw new PublicError("起動維持の形式が不正です");
+      store.updateApp(app.id, {
+        options: {
+          ...(app.options ?? DEFAULT_OPTIONS),
+          keepAlive: body.enabled,
+        },
+      });
+      supervisor.touch(app.id);
+      sendJson(response, 200, {
+        ok: true,
+        message: "起動維持を更新しました",
+        snapshot: await snapshot(),
+      });
+      return true;
+    }
+
     const appMatch = pathname.match(/^\/api\/apps\/([a-z0-9-]+)$/);
     if (request.method === "PUT" && appMatch) {
       if (!trustedMutationRequest(request)) {
         throw new PublicError("この操作リクエストは許可されていません", 403);
       }
       const appId = appMatch[1];
-      const app = store.updateApp(appId, await readJsonBody(request));
-      if (!app) throw new PublicError("アプリが見つかりません", 404);
-      await sendMutationResult(response, 200, `${app.name}の設定を更新しました`);
-      return true;
+      const unlock = supervisor.lockConfiguration(appId);
+      try {
+        const input = await readJsonBody(request);
+        const existing = store.getApp(appId);
+        if (existing) {
+          const view = await supervisor.inspect(
+            mergeConfiguredApps([], {
+              ...store.getConfig(),
+              apps: [existing],
+            })[0],
+          );
+          if (view.runtime?.processes.some((process) => process.online)) {
+            const { normalizeAppDefinition, mergeAppInput } = await import(
+              "./config.js"
+            );
+            const next = normalizeAppDefinition(
+              mergeAppInput(existing, input, appId),
+            );
+            const execution = (app: typeof next) =>
+              JSON.stringify({
+                upstream: app.upstream,
+                directory: app.directory,
+                lifecycle: app.lifecycle,
+                requiredEnvironment: app.requiredEnvironment,
+                port: app.options?.port ?? DEFAULT_OPTIONS.port,
+                environment: app.options?.environment ?? {},
+                backends: app.options?.backends ?? [],
+              });
+            if (execution(existing) !== execution(next))
+              throw new PublicError(
+                "起動設定を変更する前にアプリを停止してください",
+                409,
+              );
+          }
+        }
+        const app = store.updateApp(appId, input);
+        if (!app) throw new PublicError("アプリが見つかりません", 404);
+        await sendMutationResult(
+          response,
+          200,
+          `${app.name}の設定を更新しました`,
+        );
+        return true;
+      } finally {
+        unlock();
+      }
     }
 
     if (request.method === "DELETE" && appMatch) {
@@ -279,17 +477,33 @@ export function createLocaldeckApplication(
         throw new PublicError("この操作リクエストは許可されていません", 403);
       }
       const appId = appMatch[1];
-      if (actionLocks.has(appId)) {
-        throw new PublicError("このアプリは別の操作を実行中です", 409);
+      const unlock = supervisor.lockConfiguration(appId);
+      try {
+        const existing = store.getApp(appId);
+        if (
+          existing &&
+          (
+            await supervisor.inspect(
+              mergeConfiguredApps([], {
+                ...store.getConfig(),
+                apps: [existing],
+              })[0],
+            )
+          ).runtime?.processes.some((process) => process.online)
+        ) {
+          throw new PublicError("削除する前にアプリを停止してください", 409);
+        }
+        const app = store.deleteApp(appId);
+        if (!app) throw new PublicError("アプリが見つかりません", 404);
+        await sendMutationResult(
+          response,
+          200,
+          `${app.name}の登録とCaddy routeを削除しました`,
+        );
+        return true;
+      } finally {
+        unlock();
       }
-      const app = store.deleteApp(appId);
-      if (!app) throw new PublicError("アプリが見つかりません", 404);
-      await sendMutationResult(
-        response,
-        200,
-        `${app.name}の登録とCaddy routeを削除しました`,
-      );
-      return true;
     }
 
     const actionMatch = pathname.match(
@@ -301,28 +515,16 @@ export function createLocaldeckApplication(
       }
       const appId = actionMatch[1];
       const action = actionMatch[2] as ActionName;
-      if (actionLocks.has(appId)) {
+      if (supervisor.busy(appId)) {
         throw new PublicError("このアプリは別の操作を実行中です", 409);
       }
 
-      actionLocks.add(appId);
-      try {
-        const config = store.getConfig();
-        const caddy = await fetchCaddyState(config);
-        const app = mergeConfiguredApps(caddy.routes, config).find(
-          (candidate) => candidate.id === appId,
-        );
-        if (!app) throw new PublicError("アプリが見つかりません", 404);
-
-        const result = await executeAction(app, action, { appLogDirectory });
-        sendJson(response, 200, {
-          ok: true,
-          ...result,
-          snapshot: await snapshot(),
-        } satisfies ActionResponse);
-      } finally {
-        actionLocks.delete(appId);
-      }
+      const result = await supervisor.run(appId, action);
+      sendJson(response, 200, {
+        ok: true,
+        ...result,
+        snapshot: await snapshot(),
+      } satisfies ActionResponse);
       return true;
     }
 
@@ -332,10 +534,17 @@ export function createLocaldeckApplication(
     return false;
   }
 
-  async function serveStatic(response: ServerResponse, pathname: string): Promise<void> {
-    const relativePath = pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
+  async function serveStatic(
+    response: ServerResponse,
+    pathname: string,
+  ): Promise<void> {
+    const relativePath =
+      pathname === "/" ? "index.html" : pathname.replace(/^\/+/, "");
     const candidate = path.resolve(staticRoot, relativePath);
-    if (candidate !== staticRoot && !candidate.startsWith(`${staticRoot}${path.sep}`)) {
+    if (
+      candidate !== staticRoot &&
+      !candidate.startsWith(`${staticRoot}${path.sep}`)
+    ) {
       throw new PublicError("ファイルが見つかりません", 404);
     }
 
@@ -368,6 +577,11 @@ export function createLocaldeckApplication(
 
   const requestHandler: RequestListener = async (request, response) => {
     try {
+      const target = gatewayApp(request, store);
+      if (target) {
+        await gateway.handle(request, response, target);
+        return;
+      }
       const requestUrl = new URL(
         request.url ?? "/",
         `http://${request.headers.host ?? "localhost"}`,
@@ -378,22 +592,41 @@ export function createLocaldeckApplication(
       }
       await serveStatic(response, requestUrl.pathname);
     } catch (error) {
-      const status = error instanceof PublicError ? error.status : (errorStatus(error) ?? 500);
-      const isPublic = error instanceof PublicError || errorStatus(error) !== undefined;
+      const status =
+        error instanceof PublicError
+          ? error.status
+          : (errorStatus(error) ?? 500);
+      const isPublic =
+        error instanceof PublicError || errorStatus(error) !== undefined;
       const message = isPublic
         ? error instanceof Error
           ? error.message
-          : typeof error === "object" && error && "message" in error && typeof error.message === "string"
+          : typeof error === "object" &&
+              error &&
+              "message" in error &&
+              typeof error.message === "string"
             ? error.message
             : "Localdeck 内部で予期しないエラーが発生しました"
         : "Localdeck 内部で予期しないエラーが発生しました";
-      if (!response.headersSent) sendJson(response, status, { ok: false, error: message });
+      if (!response.headersSent)
+        sendJson(response, status, { ok: false, error: message });
       else response.destroy();
       if (!(error instanceof PublicError)) logger.error(error);
     }
   };
 
-  return { requestHandler, snapshot, synchronizeCaddy, reconcileCaddyIfNeeded };
+  return {
+    requestHandler,
+    snapshot,
+    synchronizeCaddy,
+    reconcileCaddyIfNeeded,
+    maintain: () => supervisor.maintain(),
+    upgrade: gateway.upgrade,
+    dispose: async () => {
+      gateway.dispose();
+      await supervisor.dispose();
+    },
+  };
 }
 
 export function createLocaldeckServer(
@@ -401,6 +634,14 @@ export function createLocaldeckServer(
 ): LocaldeckApplication & { server: Server } {
   const application = createLocaldeckApplication(dependencies);
   const server = http.createServer(application.requestHandler);
+  server.on(
+    "upgrade",
+    (request, socket, head) =>
+      void application.upgrade?.(request, socket, head),
+  );
+  server.once("close", () => {
+    void application.dispose?.();
+  });
   server.requestTimeout = 130_000;
   server.headersTimeout = 10_000;
   return { ...application, server };

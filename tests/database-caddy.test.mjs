@@ -141,11 +141,16 @@ function inspectedApp(app) {
 }
 
 async function createHttpFixture(t, overrides = {}) {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "localdeck-http-test-"));
+  const directory = await mkdtemp(
+    path.join(os.tmpdir(), "localdeck-http-test-"),
+  );
   t.after(() => rm(directory, { recursive: true, force: true }));
   const staticRoot = path.join(directory, "dist-local");
   await mkdir(path.join(staticRoot, "assets"), { recursive: true });
-  await writeFile(path.join(staticRoot, "index.html"), "<!doctype html><p>Localdeck</p>");
+  await writeFile(
+    path.join(staticRoot, "index.html"),
+    "<!doctype html><p>Localdeck</p>",
+  );
   await writeFile(path.join(staticRoot, "assets", "app.js"), "export {};\n");
 
   const store = overrides.store ?? createFakeStore();
@@ -168,7 +173,9 @@ async function createHttpFixture(t, overrides = {}) {
     logger: { error: () => {} },
     ...overrides,
   });
-  await new Promise((resolve) => application.server.listen(0, "127.0.0.1", resolve));
+  await new Promise((resolve) =>
+    application.server.listen(0, "127.0.0.1", resolve),
+  );
   t.after(async () => {
     if (!application.server.listening) return;
     await new Promise((resolve, reject) =>
@@ -207,12 +214,18 @@ test("旧JSONをSQLiteへ一度だけ移行してCRUDを永続化する", async 
     lifecycle: null,
   });
   assert.equal(store.listApps().length, 2);
-  assert.equal(store.updateApp("notes", { name: "Local Notes" }).name, "Local Notes");
+  assert.equal(
+    store.updateApp("notes", { name: "Local Notes" }).name,
+    "Local Notes",
+  );
   assert.equal(store.deleteApp("example").id, "example");
   store.close();
 
   const reopened = await openLocaldeckStore({ databasePath, legacyConfigPath });
-  assert.deepEqual(reopened.listApps().map((app) => app.id), ["notes"]);
+  assert.deepEqual(
+    reopened.listApps().map((app) => app.id),
+    ["notes"],
+  );
   reopened.close();
 });
 
@@ -282,7 +295,10 @@ test("HTTP factoryがhealth・snapshot・静的ファイルの公開契約を維
   assert.equal(healthResponse.headers.get("cache-control"), "no-store");
   assert.equal(healthResponse.headers.get("x-frame-options"), "DENY");
   assert.equal(healthResponse.headers.get("x-content-type-options"), "nosniff");
-  assert.match(healthResponse.headers.get("content-security-policy"), /default-src 'self'/);
+  assert.match(
+    healthResponse.headers.get("content-security-policy"),
+    /default-src 'self'/,
+  );
 
   const snapshotResponse = await fetch(`${fixture.baseUrl}/api/apps`);
   const snapshot = await snapshotResponse.json();
@@ -303,7 +319,10 @@ test("HTTP factoryがhealth・snapshot・静的ファイルの公開契約を維
   assert.equal(pageResponse.status, 200);
   assert.match(await pageResponse.text(), /Localdeck/);
   const assetResponse = await fetch(`${fixture.baseUrl}/assets/app.js`);
-  assert.equal(assetResponse.headers.get("cache-control"), "public, max-age=31536000, immutable");
+  assert.equal(
+    assetResponse.headers.get("cache-control"),
+    "public, max-age=31536000, immutable",
+  );
 });
 
 test("HTTP factoryがmutation認証・JSON境界・未知APIを公開エラーへ変換する", async (t) => {
@@ -318,7 +337,9 @@ test("HTTP factoryがmutation認証・JSON境界・未知APIを公開エラー�
 
   const denied = await fetch(`${fixture.baseUrl}/api/apps`, {
     method: "POST",
-    body: JSON.stringify(normalizedApp({ id: "denied", host: "denied.localhost" })),
+    body: JSON.stringify(
+      normalizedApp({ id: "denied", host: "denied.localhost" }),
+    ),
   });
   assert.equal(denied.status, 403);
   assert.deepEqual(await denied.json(), {
@@ -341,11 +362,17 @@ test("HTTP factoryがmutation認証・JSON境界・未知APIを公開エラー�
     body: "not-json",
   });
   assert.equal(invalidJson.status, 400);
-  assert.deepEqual(await invalidJson.json(), { ok: false, error: "JSONの形式が不正です" });
+  assert.deepEqual(await invalidJson.json(), {
+    ok: false,
+    error: "JSONの形式が不正です",
+  });
 
   const missingApi = await fetch(`${fixture.baseUrl}/api/missing`);
   assert.equal(missingApi.status, 404);
-  assert.deepEqual(await missingApi.json(), { ok: false, error: "API が見つかりません" });
+  assert.deepEqual(await missingApi.json(), {
+    ok: false,
+    error: "API が見つかりません",
+  });
 });
 
 test("HTTP factoryがCRUD・Caddy同期・アプリ操作を注入依存へ委譲する", async (t) => {
@@ -375,7 +402,10 @@ test("HTTP factoryがCRUD・Caddy同期・アプリ操作を注入依存へ委�
     body: JSON.stringify({ name: "Local Notes" }),
   });
   assert.equal(updated.status, 200);
-  assert.match((await updated.json()).message, /Local Notesの設定を更新しました/);
+  assert.match(
+    (await updated.json()).message,
+    /Local Notesの設定を更新しました/,
+  );
 
   const synchronized = await fetch(`${fixture.baseUrl}/api/caddy/sync`, {
     method: "POST",
@@ -397,31 +427,36 @@ test("HTTP factoryがCRUD・Caddy同期・アプリ操作を注入依存へ委�
     headers: { "x-localdeck-action": "1" },
   });
   assert.equal(deleted.status, 200);
-  assert.match((await deleted.json()).message, /登録とCaddy routeを削除しました/);
+  assert.match(
+    (await deleted.json()).message,
+    /登録とCaddy routeを削除しました/,
+  );
   assert.equal(fixture.store.getApp("notes"), null);
-  assert.equal(fixture.syncCalls.length, 4);
+  assert.equal(fixture.syncCalls.length, 5);
 });
 
 test("同一アプリの操作ロックを非同期処理より前に取得してDELETEとも競合させない", async (t) => {
-  let releaseFirstFetch;
-  let signalFirstFetch;
-  let fetchCount = 0;
-  const firstFetchGate = new Promise((resolve) => {
-    releaseFirstFetch = resolve;
+  let releaseFirstAction;
+  let signalFirstAction;
+  let actionCount = 0;
+  const firstActionGate = new Promise((resolve) => {
+    releaseFirstAction = resolve;
   });
-  const firstFetchStarted = new Promise((resolve) => {
-    signalFirstFetch = resolve;
+  const firstActionStarted = new Promise((resolve) => {
+    signalFirstAction = resolve;
   });
-  t.after(() => releaseFirstFetch());
+  t.after(() => releaseFirstAction());
 
+  const actionCalls = [];
   const fixture = await createHttpFixture(t, {
-    fetchCaddyState: async (config) => {
-      fetchCount += 1;
-      if (fetchCount === 1) {
-        signalFirstFetch();
-        await firstFetchGate;
+    executeAction: async (app, action) => {
+      actionCalls.push({ app: app.id, action });
+      actionCount += 1;
+      if (actionCount === 1) {
+        signalFirstAction();
+        await firstActionGate;
       }
-      return caddyStateFor(config);
+      return { message: "done", output: "" };
     },
   });
   const headers = { "x-localdeck-action": "1" };
@@ -429,12 +464,15 @@ test("同一アプリの操作ロックを非同期処理より前に取得し�
     method: "POST",
     headers,
   });
-  await firstFetchStarted;
+  await firstActionStarted;
 
-  const competingAction = await fetch(`${fixture.baseUrl}/api/apps/example/stop`, {
-    method: "POST",
-    headers,
-  });
+  const competingAction = await fetch(
+    `${fixture.baseUrl}/api/apps/example/stop`,
+    {
+      method: "POST",
+      headers,
+    },
+  );
   assert.equal(competingAction.status, 409);
   assert.deepEqual(await competingAction.json(), {
     ok: false,
@@ -447,15 +485,18 @@ test("同一アプリの操作ロックを非同期処理より前に取得し�
   });
   assert.equal(competingDelete.status, 409);
 
-  releaseFirstFetch();
+  releaseFirstAction();
   assert.equal((await firstAction).status, 200);
 
-  const actionAfterRelease = await fetch(`${fixture.baseUrl}/api/apps/example/stop`, {
-    method: "POST",
-    headers,
-  });
+  const actionAfterRelease = await fetch(
+    `${fixture.baseUrl}/api/apps/example/stop`,
+    {
+      method: "POST",
+      headers,
+    },
+  );
   assert.equal(actionAfterRelease.status, 200);
-  assert.deepEqual(fixture.actionCalls, [
+  assert.deepEqual(actionCalls, [
     { app: "example", action: "start" },
     { app: "example", action: "stop" },
   ]);
@@ -485,14 +526,18 @@ test("CRUD後のCaddy同期失敗は成功レスポンスのwarningとして返�
 });
 
 test("server indexをimportしてもDB作成やHTTP listenを開始しない", async () => {
-  const serverEntry = await import(`../dist-server/index.js?test=${Date.now()}`);
+  const serverEntry = await import(
+    `../dist-server/index.js?test=${Date.now()}`
+  );
   const paths = serverEntry.resolveLocaldeckPaths({});
   assert.match(paths.staticRoot, /dist-local$/);
   assert.match(paths.databasePath, /state\/localdeck\.sqlite$/);
 });
 
 test("runtimeがlistenからPID・reconcile・冪等shutdownまでを管理する", async (t) => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "localdeck-runtime-test-"));
+  const directory = await mkdtemp(
+    path.join(os.tmpdir(), "localdeck-runtime-test-"),
+  );
   t.after(() => rm(directory, { recursive: true, force: true }));
   const pidFile = path.join(directory, "state", "localdeck.pid");
   const server = http.createServer((_request, response) => response.end("ok"));
@@ -558,8 +603,14 @@ test("runtimeがlistenからPID・reconcile・冪等shutdownまでを管理す�
   await runtime.shutdown("TEST");
   assert.equal(server.listening, false);
   assert.equal(closeCount, 1);
-  await assert.rejects(readFile(pidFile, "utf8"), (error) => error.code === "ENOENT");
-  assert.equal(logs.filter(([message]) => message === "TEST: shutting down").length, 1);
+  await assert.rejects(
+    readFile(pidFile, "utf8"),
+    (error) => error.code === "ENOENT",
+  );
+  assert.equal(
+    logs.filter(([message]) => message === "TEST: shutting down").length,
+    1,
+  );
 
   const reconcilesAfterShutdown = reconcileCount;
   await new Promise((resolve) => setTimeout(resolve, 20));
@@ -571,7 +622,9 @@ test("runtimeがlistenからPID・reconcile・冪等shutdownまでを管理す�
 });
 
 test("runtimeが初期化中のsignalをPID記録後に安全に処理する", async (t) => {
-  const directory = await mkdtemp(path.join(os.tmpdir(), "localdeck-runtime-signal-test-"));
+  const directory = await mkdtemp(
+    path.join(os.tmpdir(), "localdeck-runtime-signal-test-"),
+  );
   t.after(() => rm(directory, { recursive: true, force: true }));
   const pidFile = path.join(directory, "state", "localdeck.pid");
   const server = http.createServer((_request, response) => response.end("ok"));
@@ -642,7 +695,10 @@ test("runtimeが初期化中のsignalをPID記録後に安全に処理する", a
   assert.equal(reconcileCount, 0);
   assert.equal(signalSource.listenerCount("SIGINT"), 0);
   assert.equal(signalSource.listenerCount("SIGTERM"), 0);
-  await assert.rejects(readFile(pidFile, "utf8"), (error) => error.code === "ENOENT");
+  await assert.rejects(
+    readFile(pidFile, "utf8"),
+    (error) => error.code === "ENOENT",
+  );
 
   await runtime.shutdown("TEST AGAIN");
   assert.equal(closeCount, 1);

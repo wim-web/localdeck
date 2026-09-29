@@ -33,6 +33,7 @@ type RunCommandOptions = {
 
 type ExecuteActionOptions = {
   appLogDirectory?: string;
+  environment?: NodeJS.ProcessEnv;
 };
 
 export function isPortOpen(
@@ -51,7 +52,9 @@ export function isPortOpen(
       socket.destroy();
       resolve({
         online,
-        latencyMs: online ? Math.max(1, Math.round(performance.now() - startedAt)) : null,
+        latencyMs: online
+          ? Math.max(1, Math.round(performance.now() - startedAt))
+          : null,
       });
     };
 
@@ -83,7 +86,8 @@ export function runCommand(
 
     const append = (chunk: Buffer | string): void => {
       output += chunk.toString();
-      if (output.length > MAX_COMMAND_OUTPUT) output = output.slice(-MAX_COMMAND_OUTPUT);
+      if (output.length > MAX_COMMAND_OUTPUT)
+        output = output.slice(-MAX_COMMAND_OUTPUT);
     };
     child.stdout.on("data", append);
     child.stderr.on("data", append);
@@ -95,7 +99,12 @@ export function runCommand(
 
     child.once("error", (error) => {
       clearTimeout(timer);
-      reject(new PublicError(`コマンドを開始できませんでした: ${error.message}`, 500));
+      reject(
+        new PublicError(
+          `コマンドを開始できませんでした: ${error.message}`,
+          500,
+        ),
+      );
     });
     child.once("exit", (code, signal) => {
       clearTimeout(timer);
@@ -110,7 +119,8 @@ export function runCommand(
       } else if (code !== 0) {
         reject(
           new PublicError(
-            trimmed || `コマンドが終了コード ${code ?? signal ?? "不明"} で失敗しました`,
+            trimmed ||
+              `コマンドが終了コード ${code ?? signal ?? "不明"} で失敗しました`,
             500,
           ),
         );
@@ -129,10 +139,7 @@ async function listenerPids(port: number): Promise<number[]> {
     );
     return [
       ...new Set(
-        result.output
-          .split(/\s+/)
-          .map(Number)
-          .filter(Number.isInteger),
+        result.output.split(/\s+/).map(Number).filter(Number.isInteger),
       ),
     ];
   } catch (error) {
@@ -143,10 +150,15 @@ async function listenerPids(port: number): Promise<number[]> {
 
 async function processCwd(pid: number): Promise<string | null> {
   try {
-    const result = await runCommand(["lsof", "-a", "-p", String(pid), "-d", "cwd", "-Fn"], {
-      timeoutMs: 3000,
-    });
-    const cwdLine = result.output.split("\n").find((line) => line.startsWith("n"));
+    const result = await runCommand(
+      ["lsof", "-a", "-p", String(pid), "-d", "cwd", "-Fn"],
+      {
+        timeoutMs: 3000,
+      },
+    );
+    const cwdLine = result.output
+      .split("\n")
+      .find((line) => line.startsWith("n"));
     return cwdLine?.slice(1) ?? null;
   } catch {
     return null;
@@ -177,13 +189,17 @@ async function processGroupId(pid: number): Promise<number | null> {
     if (!value) return null;
     if (!/^\d+$/.test(value)) return null;
     const processGroup = Number(value);
-    return Number.isInteger(processGroup) && processGroup > 1 ? processGroup : null;
+    return Number.isInteger(processGroup) && processGroup > 1
+      ? processGroup
+      : null;
   } catch {
     return null;
   }
 }
 
-async function normalizedRealpath(value: string | null): Promise<string | null> {
+async function normalizedRealpath(
+  value: string | null,
+): Promise<string | null> {
   if (!value) return null;
   try {
     return await realpath(value);
@@ -213,7 +229,10 @@ async function assertManagedPid(app: ManagedApp, pid: number): Promise<void> {
   }
 }
 
-async function managedProcessGroupId(app: ManagedApp, pid: number): Promise<number | null> {
+async function managedProcessGroupId(
+  app: ManagedApp,
+  pid: number,
+): Promise<number | null> {
   const processGroup = await processGroupId(pid);
   if (!processGroup) return null;
   try {
@@ -254,7 +273,10 @@ async function waitForPort(
   );
 }
 
-async function waitForProcessExit(pid: number, timeoutMs: number): Promise<void> {
+async function waitForProcessExit(
+  pid: number,
+  timeoutMs: number,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
@@ -268,7 +290,10 @@ async function waitForProcessExit(pid: number, timeoutMs: number): Promise<void>
   throw new PublicError(`PID ${pid} が停止待ち時間内に終了しませんでした`, 504);
 }
 
-async function waitForProcessGroupExit(processGroup: number, timeoutMs: number): Promise<void> {
+async function waitForProcessGroupExit(
+  processGroup: number,
+  timeoutMs: number,
+): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     try {
@@ -276,7 +301,8 @@ async function waitForProcessGroupExit(processGroup: number, timeoutMs: number):
         ["lsof", "-a", "-g", String(processGroup), "-d", "cwd", "-Fp"],
         { timeoutMs: 3000 },
       );
-      if (!result.output.split("\n").some((line) => /^p\d+$/.test(line))) return;
+      if (!result.output.split("\n").some((line) => /^p\d+$/.test(line)))
+        return;
     } catch (error) {
       if (error instanceof PublicError) return;
       throw error;
@@ -289,8 +315,13 @@ async function waitForProcessGroupExit(processGroup: number, timeoutMs: number):
   );
 }
 
-function ensureRequiredEnvironment(app: ManagedApp): void {
-  const missing = (app.requiredEnvironment ?? []).filter((name) => !process.env[name]);
+function ensureRequiredEnvironment(
+  app: ManagedApp,
+  environment: NodeJS.ProcessEnv = process.env,
+): void {
+  const missing = (app.requiredEnvironment ?? []).filter(
+    (name) => !environment[name],
+  );
   if (missing.length > 0) {
     throw new PublicError(
       `Localdeck の起動環境に ${missing.join(", ")} がないため、このアプリを起動できません`,
@@ -299,10 +330,16 @@ function ensureRequiredEnvironment(app: ManagedApp): void {
   }
 }
 
-function resolveAppLogFile(app: ManagedApp, options: ExecuteActionOptions): string {
+function resolveAppLogFile(
+  app: ManagedApp,
+  options: ExecuteActionOptions,
+): string {
   const logDirectory = options.appLogDirectory;
   if (!logDirectory || !path.isAbsolute(logDirectory)) {
-    throw new PublicError("Localdeckのアプリログ保存先が設定されていません", 500);
+    throw new PublicError(
+      "Localdeckのアプリログ保存先が設定されていません",
+      500,
+    );
   }
   return path.join(logDirectory, `${app.id}.log`);
 }
@@ -312,18 +349,27 @@ async function startDetachedProcess(
   endpoint: { address: string; port: number },
   options: ExecuteActionOptions,
 ): Promise<ActionResult> {
-  ensureRequiredEnvironment(app);
+  ensureRequiredEnvironment(app, { ...process.env, ...options.environment });
   const current = await isPortOpen(endpoint.address, endpoint.port);
-  if (current.online) throw new PublicError(`${app.name} はすでに起動しています`, 409);
+  if (current.online)
+    throw new PublicError(`${app.name} はすでに起動しています`, 409);
 
   const lifecycle = app.lifecycle;
-  if (!lifecycle || lifecycle.strategy !== "process" || lifecycle.start.length === 0) {
+  if (
+    !lifecycle ||
+    lifecycle.strategy !== "process" ||
+    lifecycle.start.length === 0
+  ) {
     throw new PublicError(`${app.name} の起動コマンドがありません`, 409);
   }
 
   const logFile = resolveAppLogFile(app, options);
   await mkdir(path.dirname(logFile), { recursive: true });
-  await appendFile(logFile, `\n[${new Date().toISOString()}] Localdeck start\n`, "utf8");
+  await appendFile(
+    logFile,
+    `\n[${new Date().toISOString()}] Localdeck start\n`,
+    "utf8",
+  );
   const handle = await open(logFile, "a");
 
   let child: ChildProcess | undefined;
@@ -331,7 +377,7 @@ async function startDetachedProcess(
   try {
     child = spawn(lifecycle.start[0], lifecycle.start.slice(1), {
       cwd: app.directory ?? undefined,
-      env: process.env,
+      env: { ...process.env, ...options.environment },
       detached: true,
       shell: false,
       stdio: ["ignore", handle.fd, handle.fd],
@@ -341,7 +387,9 @@ async function startDetachedProcess(
         reject(new PublicError(`起動できませんでした: ${error.message}`, 500)),
       );
       child?.once("exit", () => {
-        reject(new PublicError(`起動直後に終了しました。ログ: ${logFile}`, 500));
+        reject(
+          new PublicError(`起動直後に終了しました。ログ: ${logFile}`, 500),
+        );
       });
     });
     void earlyFailure.catch(() => undefined);
@@ -352,7 +400,8 @@ async function startDetachedProcess(
   if (!child || !earlyFailure) {
     throw new PublicError("起動プロセスを作成できませんでした", 500);
   }
-  const childPid = Number.isInteger(child.pid) && (child.pid ?? 0) > 1 ? child.pid! : null;
+  const childPid =
+    Number.isInteger(child.pid) && (child.pid ?? 0) > 1 ? child.pid! : null;
   if (childPid) managedProcessGroups.set(app.id, childPid);
   child.unref();
   const startupController = new AbortController();
@@ -368,6 +417,18 @@ async function startDetachedProcess(
       ),
       earlyFailure,
     ]);
+    const listeners = await listenerPids(endpoint.port);
+    const groups = await Promise.all(listeners.map(processGroupId));
+    if (
+      !childPid ||
+      groups.length === 0 ||
+      groups.some((group) => group !== childPid)
+    ) {
+      throw new PublicError(
+        `ポート ${endpoint.port} の待受が起動したプロセスと一致しません`,
+        409,
+      );
+    }
   } catch (error) {
     managedProcessGroups.delete(app.id);
     if (childPid) {
@@ -410,7 +471,12 @@ async function stopDetachedProcess(
       await Promise.all([
         waitForProcessGroupExit(managedPid, lifecycle.stopTimeoutMs),
         current.online
-          ? waitForPort(endpoint.address, endpoint.port, false, lifecycle.stopTimeoutMs)
+          ? waitForPort(
+              endpoint.address,
+              endpoint.port,
+              false,
+              lifecycle.stopTimeoutMs,
+            )
           : Promise.resolve(),
       ]);
       managedProcessGroups.delete(app.id);
@@ -422,11 +488,15 @@ async function stopDetachedProcess(
   }
 
   const current = await isPortOpen(endpoint.address, endpoint.port);
-  if (!current.online) return { message: `${app.name} はすでに停止しています`, output: "" };
+  if (!current.online)
+    return { message: `${app.name} はすでに停止しています`, output: "" };
 
   const pids = await listenerPids(endpoint.port);
   if (pids.length === 0) {
-    throw new PublicError(`ポート ${endpoint.port} の PID を特定できませんでした`, 409);
+    throw new PublicError(
+      `ポート ${endpoint.port} の PID を特定できませんでした`,
+      409,
+    );
   }
   const targets = await Promise.all(
     pids.map(async (pid) => {
@@ -438,21 +508,31 @@ async function stopDetachedProcess(
     ...new Set(
       targets
         .map((target) => target.processGroup)
-        .filter((processGroup): processGroup is number => processGroup !== null),
+        .filter(
+          (processGroup): processGroup is number => processGroup !== null,
+        ),
     ),
   ];
   const standalonePids = targets
     .filter((target) => target.processGroup === null)
     .map((target) => target.pid);
 
-  for (const processGroup of processGroups) process.kill(-processGroup, "SIGTERM");
+  for (const processGroup of processGroups)
+    process.kill(-processGroup, "SIGTERM");
   for (const pid of standalonePids) process.kill(pid, "SIGTERM");
   await Promise.all([
-    waitForPort(endpoint.address, endpoint.port, false, lifecycle.stopTimeoutMs),
+    waitForPort(
+      endpoint.address,
+      endpoint.port,
+      false,
+      lifecycle.stopTimeoutMs,
+    ),
     ...processGroups.map((processGroup) =>
       waitForProcessGroupExit(processGroup, lifecycle.stopTimeoutMs),
     ),
-    ...standalonePids.map((pid) => waitForProcessExit(pid, lifecycle.stopTimeoutMs)),
+    ...standalonePids.map((pid) =>
+      waitForProcessExit(pid, lifecycle.stopTimeoutMs),
+    ),
   ]);
   return { message: `${app.name} を停止しました`, output: "" };
 }
@@ -463,7 +543,10 @@ export async function executeAction(
   options: ExecuteActionOptions = {},
 ): Promise<ActionResult> {
   if (!app.configured || !app.lifecycle) {
-    throw new PublicError("このルートは監視のみで、操作は登録されていません", 409);
+    throw new PublicError(
+      "このルートは監視のみで、操作は登録されていません",
+      409,
+    );
   }
   if (!["start", "restart", "stop"].includes(action)) {
     throw new PublicError("未対応の操作です");
@@ -473,13 +556,18 @@ export async function executeAction(
   if (!endpoint) throw new PublicError("操作対象のポートを特定できません", 409);
 
   if (app.lifecycle.strategy === "commands") {
-    if (action !== "stop") ensureRequiredEnvironment(app);
+    if (action !== "stop")
+      ensureRequiredEnvironment(app, {
+        ...process.env,
+        ...options.environment,
+      });
     const command = app.lifecycle[action];
     if (!Array.isArray(command)) {
       throw new PublicError(`${action} コマンドが登録されていません`, 409);
     }
     const result = await runCommand(command, {
       cwd: app.directory,
+      env: { ...process.env, ...options.environment },
       timeoutMs: app.lifecycle.timeoutMs,
     });
     const shouldBeOnline = action !== "stop";
@@ -501,14 +589,16 @@ function actionAvailability(
   online: boolean,
 ): Record<ActionName, ActionAvailability> {
   const missingEnvironment = (app.requiredEnvironment ?? []).filter(
-    (name) => !process.env[name],
+    (name) => !(app.options?.environment[name] ?? process.env[name]),
   );
   const hasControl = Boolean(app.configured && app.lifecycle);
   const hasStart = Boolean(app.lifecycle?.start);
   const hasRestart = Boolean(
     app.lifecycle?.strategy === "process" || app.lifecycle?.restart,
   );
-  const hasStop = Boolean(app.lifecycle?.strategy === "process" || app.lifecycle?.stop);
+  const hasStop = Boolean(
+    app.lifecycle?.strategy === "process" || app.lifecycle?.stop,
+  );
   const environmentReason = missingEnvironment.length
     ? `Localdeck の環境に ${missingEnvironment.join(", ")} がありません`
     : null;
@@ -558,6 +648,7 @@ function appDefinition(app: ManagedApp): AppDefinition {
     requiredEnvironment: app.requiredEnvironment ?? [],
     lifecycle: app.lifecycle,
     proxy: app.proxy ?? {},
+    ...(app.options ? { options: app.options } : {}),
   };
 }
 

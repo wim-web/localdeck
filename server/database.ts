@@ -5,12 +5,16 @@ import { DatabaseSync } from "node:sqlite";
 import {
   mergeAppInput,
   normalizeAppDefinition,
+  normalizeCategory,
+  parseUpstream,
   requestedAppId,
   validateConfig,
 } from "./config.js";
 import { errorCode, PublicError } from "./errors.js";
 import type {
   AppDefinition,
+  AppRuntime,
+  Category,
   LegacyConfig,
   LocaldeckConfig,
   LocaldeckStoreLike,
@@ -54,6 +58,11 @@ const SCHEMA = `
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
   ) STRICT;
+
+  CREATE TABLE IF NOT EXISTS categories (
+    id TEXT PRIMARY KEY, name TEXT NOT NULL, color TEXT NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0
+  ) STRICT;
 `;
 
 type SqliteRow = Record<string, unknown>;
@@ -88,6 +97,9 @@ function rowToApp(row: SqliteRow | undefined): AppDefinition | null {
     requiredEnvironment: parseJson<unknown>(row.required_environment_json, []),
     lifecycle: parseJson<unknown>(row.lifecycle_json, null),
     proxy: parseJson<unknown>(row.proxy_json, {}),
+    ...(row.options_json && row.options_json !== "null"
+      ? { options: parseJson<unknown>(row.options_json, {}) }
+      : {}),
   });
 }
 
@@ -131,26 +143,57 @@ export class LocaldeckStore implements LocaldeckStoreLike {
         port,
       },
       apps: this.listApps(),
+      categories: this.listCategories(),
     };
   }
 
   listApps(): AppDefinition[] {
     return this.database
-      .prepare("SELECT * FROM apps ORDER BY position ASC, name COLLATE NOCASE ASC")
+      .prepare(
+        "SELECT * FROM apps ORDER BY position ASC, name COLLATE NOCASE ASC",
+      )
       .all()
       .map((row) => rowToApp(row as SqliteRow))
       .filter((app): app is AppDefinition => app !== null);
   }
 
   getApp(id: string): AppDefinition | null {
-    const row = this.database.prepare("SELECT * FROM apps WHERE id = ?").get(id);
+    const row = this.database
+      .prepare("SELECT * FROM apps WHERE id = ?")
+      .get(id);
     return rowToApp(row as SqliteRow | undefined);
+  }
+
+  private validateAppReferences(app: AppDefinition): void {
+    if (
+      app.options?.categoryId &&
+      !this.listCategories().some(
+        (category) => category.id === app.options!.categoryId,
+      )
+    ) {
+      throw new PublicError("カテゴリが見つかりません", 400);
+    }
+    const config = this.getConfig();
+    if (app.host === config.dashboard.host)
+      throw new PublicError("管理画面のドメインは登録できません", 400);
+    const endpoint = parseUpstream(app.upstream)!;
+    if (
+      ["127.0.0.1", "localhost", "::1", config.dashboard.bind].includes(
+        endpoint.address,
+      ) &&
+      endpoint.port === config.dashboard.port
+    ) {
+      throw new PublicError("Localdeck自身を転送先に指定できません", 400);
+    }
   }
 
   createApp(input: unknown): AppDefinition {
     const app = normalizeAppDefinition(input);
+    this.validateAppReferences(app);
     const row = this.database
-      .prepare("SELECT COALESCE(MAX(position), -1) + 1 AS next_position FROM apps")
+      .prepare(
+        "SELECT COALESCE(MAX(position), -1) + 1 AS next_position FROM apps",
+      )
       .get() as SqliteRow | undefined;
     const position = row?.next_position;
     if (typeof position !== "number") {
@@ -162,7 +205,8 @@ export class LocaldeckStore implements LocaldeckStoreLike {
       throw sqliteConflict(error);
     }
     const created = this.getApp(app.id);
-    if (!created) throw new Error("登録したアプリをSQLiteから取得できませんでした");
+    if (!created)
+      throw new Error("登録したアプリをSQLiteから取得できませんでした");
     return created;
   }
 
@@ -172,14 +216,17 @@ export class LocaldeckStore implements LocaldeckStoreLike {
     const inputId = requestedAppId(input);
     if (inputId && inputId !== id) throw new Error("アプリIDは変更できません");
     const app = normalizeAppDefinition(mergeAppInput(current, input, id));
+    this.validateAppReferences(app);
     try {
       this.database
-        .prepare(`
+        .prepare(
+          `
           UPDATE apps SET
             name = ?, description = ?, host = ?, upstream = ?, directory = ?,
-            required_environment_json = ?, lifecycle_json = ?, proxy_json = ?, updated_at = ?
+            required_environment_json = ?, lifecycle_json = ?, proxy_json = ?, options_json = ?, updated_at = ?
           WHERE id = ?
-        `)
+        `,
+        )
         .run(
           app.name,
           app.description,
@@ -189,6 +236,7 @@ export class LocaldeckStore implements LocaldeckStoreLike {
           JSON.stringify(app.requiredEnvironment),
           app.lifecycle ? JSON.stringify(app.lifecycle) : null,
           JSON.stringify(app.proxy),
+          JSON.stringify(app.options ?? null),
           now(),
           id,
         );
@@ -209,16 +257,90 @@ export class LocaldeckStore implements LocaldeckStoreLike {
     this.database.close();
   }
 
+  reorderApps(ids: string[]): void {
+    const apps = this.listApps();
+    if (
+      ids.length !== apps.length ||
+      new Set(ids).size !== ids.length ||
+      ids.some((id) => !apps.some((app) => app.id === id))
+    ) {
+      throw new PublicError("すべてのアプリIDを重複なく指定してください");
+    }
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      const update = this.database.prepare(
+        "UPDATE apps SET position = ? WHERE id = ?",
+      );
+      ids.forEach((id, index) => update.run(index, id));
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  listCategories(): Category[] {
+    return this.database
+      .prepare("SELECT id, name, color FROM categories ORDER BY position, name")
+      .all() as Category[];
+  }
+
+  saveCategory(input: Category): Category {
+    const category = normalizeCategory(input);
+    this.database
+      .prepare(
+        `INSERT INTO categories (id, name, color, position)
+      VALUES (?, ?, ?, (SELECT COALESCE(MAX(position), -1) + 1 FROM categories))
+      ON CONFLICT(id) DO UPDATE SET name = excluded.name, color = excluded.color`,
+      )
+      .run(category.id, category.name, category.color);
+    return category;
+  }
+
+  deleteCategory(id: string): void {
+    this.database.exec("BEGIN IMMEDIATE");
+    try {
+      for (const app of this.listApps())
+        if (app.options?.categoryId === id) {
+          this.updateApp(app.id, {
+            options: { ...app.options, categoryId: null },
+          });
+        }
+      this.database.prepare("DELETE FROM categories WHERE id = ?").run(id);
+      this.database.exec("COMMIT");
+    } catch (error) {
+      this.database.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  getRuntime(id: string): AppRuntime | null {
+    return parseJson<AppRuntime | null>(
+      this.database
+        .prepare("SELECT runtime_json FROM apps WHERE id = ?")
+        .get(id)?.runtime_json,
+      null,
+    );
+  }
+
+  setRuntime(id: string, runtime: AppRuntime): void {
+    this.database
+      .prepare("UPDATE apps SET runtime_json = ? WHERE id = ?")
+      .run(JSON.stringify(runtime), id);
+  }
+
   insertAppRecord(app: AppDefinition, position: number): void {
     const timestamp = now();
     this.database
-      .prepare(`
+      .prepare(
+        `
         INSERT INTO apps (
           id, name, description, host, upstream, directory,
-          required_environment_json, lifecycle_json, proxy_json,
+          required_environment_json, lifecycle_json, proxy_json, options_json,
           position, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `,
+      )
       .run(
         app.id,
         app.name,
@@ -229,6 +351,7 @@ export class LocaldeckStore implements LocaldeckStoreLike {
         JSON.stringify(app.requiredEnvironment),
         app.lifecycle ? JSON.stringify(app.lifecycle) : null,
         JSON.stringify(app.proxy),
+        JSON.stringify(app.options ?? null),
         position,
         timestamp,
         timestamp,
@@ -236,7 +359,9 @@ export class LocaldeckStore implements LocaldeckStoreLike {
   }
 }
 
-async function readLegacyConfig(legacyConfigPath?: string): Promise<LegacyConfig> {
+async function readLegacyConfig(
+  legacyConfigPath?: string,
+): Promise<LegacyConfig> {
   if (!legacyConfigPath) return DEFAULT_CONFIG;
   try {
     const raw = await readFile(legacyConfigPath, "utf8");
@@ -260,6 +385,20 @@ export async function openLocaldeckStore({
   database.exec("PRAGMA foreign_keys = ON");
   database.exec("PRAGMA busy_timeout = 5000");
   database.exec(SCHEMA);
+  const columns = database.prepare("PRAGMA table_info(apps)").all();
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    if (!columns.some((column) => column.name === "options_json"))
+      database.exec("ALTER TABLE apps ADD COLUMN options_json TEXT");
+    if (!columns.some((column) => column.name === "runtime_json"))
+      database.exec("ALTER TABLE apps ADD COLUMN runtime_json TEXT");
+    database.exec("PRAGMA user_version = 2");
+    database.exec("COMMIT");
+  } catch (error) {
+    database.exec("ROLLBACK");
+    database.close();
+    throw error;
+  }
 
   const existing = database
     .prepare("SELECT singleton FROM localdeck_settings WHERE singleton = 1")
@@ -271,12 +410,14 @@ export async function openLocaldeckStore({
     try {
       const timestamp = now();
       database
-        .prepare(`
+        .prepare(
+          `
           INSERT INTO localdeck_settings (
             singleton, dashboard_name, dashboard_host, dashboard_bind,
             dashboard_port, caddy_admin_url, created_at, updated_at
           ) VALUES (1, ?, ?, ?, ?, ?, ?, ?)
-        `)
+        `,
+        )
         .run(
           legacy.dashboard.name ?? "Localdeck",
           legacy.dashboard.host,
@@ -289,7 +430,7 @@ export async function openLocaldeckStore({
       for (const [index, input] of (legacy.apps ?? []).entries()) {
         store.insertAppRecord(normalizeAppDefinition(input), index);
       }
-      database.exec("PRAGMA user_version = 1");
+      database.exec("PRAGMA user_version = 2");
       database.exec("COMMIT");
     } catch (error) {
       database.exec("ROLLBACK");

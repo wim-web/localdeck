@@ -96,7 +96,8 @@ export function createCommandItems({
       },
     );
 
-    const actions: ActionName[] = app.status === "online" ? ["restart", "stop"] : ["start"];
+    const hasRunningProcess = app.status === "online" || Boolean(app.runtime?.processes.some((process) => process.online));
+    const actions: ActionName[] = hasRunningProcess ? ["restart", "stop"] : ["start"];
     for (const action of actions) {
       const availability = app.actions[action];
       const busy = busyAppIds.has(app.id);
@@ -115,8 +116,8 @@ export function createCommandItems({
       id: app.id + "-delete",
       label: app.name + "の登録を削除",
       keywords: app.host + " remove delete",
-      disabled: pendingDeleteAppId !== null || busy,
-      reason: pendingDeleteAppId !== null ? "別の削除を取り消せます" : busy ? "操作中" : null,
+      disabled: pendingDeleteAppId !== null || busy || hasRunningProcess,
+      reason: pendingDeleteAppId !== null ? "別の削除を取り消せます" : busy ? "操作中" : hasRunningProcess ? "先にアプリを停止してください" : null,
       tone: "danger",
       run: () => onDelete(app),
     });

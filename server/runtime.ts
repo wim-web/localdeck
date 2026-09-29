@@ -28,11 +28,17 @@ export type LocaldeckRuntimeOptions = {
 async function recordPid(pidFile: string): Promise<void> {
   await mkdir(path.dirname(pidFile), { recursive: true });
   const temporary = `${pidFile}.tmp.${process.pid}`;
-  await writeFile(temporary, `${process.pid}\n`, { encoding: "utf8", mode: 0o600 });
+  await writeFile(temporary, `${process.pid}\n`, {
+    encoding: "utf8",
+    mode: 0o600,
+  });
   await rename(temporary, pidFile);
 }
 
-async function clearOwnPid(pidFile: string, logger: RuntimeLogger): Promise<void> {
+async function clearOwnPid(
+  pidFile: string,
+  logger: RuntimeLogger,
+): Promise<void> {
   try {
     const recorded = (await readFile(pidFile, "utf8")).trim();
     if (recorded === String(process.pid)) await unlink(pidFile);
@@ -78,6 +84,7 @@ export async function startLocaldeckRuntime(
     writePid = recordPid,
   } = options;
   let reconcileTimer: NodeJS.Timeout | null = null;
+  let maintenanceTimer: NodeJS.Timeout | null = null;
   let shuttingDown = false;
   let pidInitialization: Promise<void> = Promise.resolve();
   let shutdownPromise: Promise<void> | null = null;
@@ -91,10 +98,12 @@ export async function startLocaldeckRuntime(
     if (shutdownPromise) return shutdownPromise;
     shuttingDown = true;
     if (reconcileTimer) clearInterval(reconcileTimer);
+    if (maintenanceTimer) clearInterval(maintenanceTimer);
     logger.log(`${signal}: shutting down`);
     shutdownPromise = (async () => {
       try {
         await pidInitialization;
+        await application.dispose?.();
         const closeError = await closeServer(server);
         await clearOwnPid(pidFile, logger);
         store.close();
@@ -135,7 +144,9 @@ export async function startLocaldeckRuntime(
     await application.synchronizeCaddy();
     logger.log("Caddy configuration synchronized from SQLite");
   } catch (error) {
-    logger.error(`Caddy synchronization deferred: ${errorMessage(error, "unknown error")}`);
+    logger.error(
+      `Caddy synchronization deferred: ${errorMessage(error, "unknown error")}`,
+    );
   }
   if (shuttingDown) {
     await shutdownPromise;
@@ -143,10 +154,18 @@ export async function startLocaldeckRuntime(
   }
 
   reconcileTimer = setInterval(() => {
-    void application.reconcileCaddyIfNeeded().catch((error) =>
-      logger.error(`Caddy reconciliation failed: ${errorMessage(error, "unknown error")}`),
-    );
+    void application
+      .reconcileCaddyIfNeeded()
+      .catch((error) =>
+        logger.error(
+          `Caddy reconciliation failed: ${errorMessage(error, "unknown error")}`,
+        ),
+      );
   }, reconcileIntervalMs);
   reconcileTimer.unref();
+  maintenanceTimer = setInterval(() => {
+    void application.maintain?.().catch((error) => logger.error(error));
+  }, 5_000);
+  maintenanceTimer.unref();
   return { shutdown };
 }

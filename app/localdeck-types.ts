@@ -6,11 +6,24 @@ export type {
   ActionName,
   AppDefinition,
   LifecycleDefinition,
+  AppOptions,
+  BackendDefinition,
+  Category,
 } from "../server/types";
 
 export type LocalApp = InspectedApp;
 export type Snapshot = ServerSnapshot;
 
+export type BackendForm = {
+  id: string;
+  name: string;
+  directory: string;
+  command: string;
+  port: string;
+  portMode: "fixed" | "auto";
+  portEnvironment: string;
+  environment: string;
+};
 export type FormState = {
   id: string;
   name: string;
@@ -27,6 +40,16 @@ export type FormState = {
   startTimeoutMs: string;
   stopTimeoutMs: string;
   headerUpHost: string;
+  categoryId: string;
+  portMode: "fixed" | "auto";
+  portEnvironment: string;
+  environment: string;
+  backends: BackendForm[];
+  wakeOnRequest: boolean;
+  idleStopMinutes: string;
+  activityPath: string;
+  requestOnlyIdle: boolean;
+  keepAlive: boolean;
 };
 
 export type Notice = {
