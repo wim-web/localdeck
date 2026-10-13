@@ -25,7 +25,7 @@ const DEFAULT_CONFIG: LocaldeckConfig = {
   caddyAdminUrl: "http://127.0.0.1:2019/config/",
   dashboard: {
     name: "Localdeck",
-    host: "apps.localhost",
+    host: "localdeck.localhost",
     bind: "127.0.0.1",
     port: 4545,
   },

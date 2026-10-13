@@ -61,7 +61,7 @@ const caddyFixture = {
 
 const configFixture = {
   version: 1,
-  dashboard: { host: "apps.localhost", port: 4545 },
+  dashboard: { host: "localdeck.localhost", port: 4545 },
   apps: [
     {
       id: "symphony",

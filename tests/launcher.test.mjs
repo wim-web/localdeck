@@ -89,7 +89,7 @@ restart_all
     "restart-caddy",
     "start-dashboard",
     "sync-routes",
-    "https://apps.localhost",
+    "https://localdeck.localhost",
   ]);
   assert.match(source, /\n[ ]{2}restart\)\n[ ]{4}restart_all\n[ ]{4};;/);
 });

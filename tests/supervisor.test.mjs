@@ -306,7 +306,7 @@ test("gateway-enabled apps route through Localdeck while direct apps keep their 
     options: { ...DEFAULT_OPTIONS, wakeOnRequest: true },
   });
   const config = {
-    dashboard: { host: "apps.localhost", bind: "127.0.0.1", port: 4545 },
+    dashboard: { host: "localdeck.localhost", bind: "127.0.0.1", port: 4545 },
     caddyAdminUrl: "http://127.0.0.1:2019",
     apps: [app],
   };
@@ -318,7 +318,7 @@ test("gateway-enabled apps route through Localdeck while direct apps keep their 
       {
         connected: true,
         routes: [
-          { host: "apps.localhost", upstreams: ["127.0.0.1:4545"] },
+          { host: "localdeck.localhost", upstreams: ["127.0.0.1:4545"] },
           { host: "notes.localhost", upstreams: ["127.0.0.1:4545"] },
         ],
       },

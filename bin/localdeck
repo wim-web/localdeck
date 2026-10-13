@@ -467,7 +467,7 @@ start_all() {
   if ! sync_routes; then
     return 1
   fi
-  echo "https://apps.localhost"
+  echo "https://localdeck.localhost"
 }
 
 stop_all() {
@@ -483,7 +483,7 @@ restart_all() {
   restart_caddy
   start_dashboard
   sync_routes
-  echo "https://apps.localhost"
+  echo "https://localdeck.localhost"
 }
 
 status_dashboard() {
@@ -518,7 +518,7 @@ status_all() {
   result=0
   status_caddy || result=1
   status_dashboard || result=1
-  [ "$result" -ne 0 ] || echo "https://apps.localhost"
+  [ "$result" -ne 0 ] || echo "https://localdeck.localhost"
   return "$result"
 }
 

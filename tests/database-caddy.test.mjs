@@ -16,7 +16,7 @@ const legacyConfig = {
   caddyAdminUrl: "http://127.0.0.1:2019/config/",
   dashboard: {
     name: "Localdeck",
-    host: "apps.localhost",
+    host: "localdeck.localhost",
     bind: "127.0.0.1",
     port: 4545,
   },
@@ -53,7 +53,7 @@ function createFakeStore(initialApps = [normalizedApp()]) {
     caddyAdminUrl: "http://127.0.0.1:2019/config/",
     dashboard: {
       name: "Localdeck",
-      host: "apps.localhost",
+      host: "localdeck.localhost",
       bind: "127.0.0.1",
       port: 4545,
     },
@@ -243,7 +243,7 @@ test("SQLiteの全アプリとダッシュボードからCaddyfileを生成す�
       },
     ],
   });
-  assert.match(source, /"apps\.localhost"/);
+  assert.match(source, /"localdeck\.localhost"/);
   assert.match(source, /"example\.localhost"/);
   assert.match(source, /reverse_proxy "127\.0\.0\.1:9000"/);
   assert.match(source, /header_up Host "localhost"/);
@@ -289,7 +289,7 @@ test("HTTP factoryがhealth・snapshot・静的ファイルの公開契約を維
   assert.deepEqual(await healthResponse.json(), {
     ok: true,
     name: "Localdeck",
-    host: "apps.localhost",
+    host: "localdeck.localhost",
     now: "2026-08-30T00:00:00.000Z",
   });
   assert.equal(healthResponse.headers.get("cache-control"), "no-store");
