@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { appendFile, mkdir, open, realpath } from "node:fs/promises";
 import net from "node:net";
+import { homedir } from "node:os";
 import path from "node:path";
 
 import { parseUpstream } from "./config.js";
@@ -66,6 +67,24 @@ export function isPortOpen(
   });
 }
 
+function withMiseShims(environment: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+  const dataDirectory =
+    environment.MISE_DATA_DIR ||
+    path.join(
+      environment.XDG_DATA_HOME ||
+        path.join(environment.HOME || homedir(), ".local", "share"),
+      "mise",
+    );
+  const shimsDirectory =
+    environment.MISE_SHIMS_DIR || path.join(dataDirectory, "shims");
+  // Shell activation and npm can put Localdeck's own tool versions first.
+  // Resolve each managed app's tools from its working directory instead.
+  return {
+    ...environment,
+    PATH: [shimsDirectory, environment.PATH].filter(Boolean).join(path.delimiter),
+  };
+}
+
 export function runCommand(
   command: string[],
   options: RunCommandOptions = {},
@@ -78,7 +97,7 @@ export function runCommand(
   return new Promise((resolve, reject) => {
     const child = spawn(command[0], command.slice(1), {
       cwd: options.cwd ?? undefined,
-      env: options.env ?? process.env,
+      env: withMiseShims(options.env ?? process.env),
       shell: false,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -378,7 +397,7 @@ async function startDetachedProcess(
   try {
     child = spawn(lifecycle.start[0], lifecycle.start.slice(1), {
       cwd: app.directory ?? undefined,
-      env: { ...process.env, ...options.environment },
+      env: withMiseShims({ ...process.env, ...options.environment }),
       detached: true,
       shell: false,
       stdio: ["ignore", handle.fd, handle.fd],

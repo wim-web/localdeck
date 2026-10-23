@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -16,6 +16,8 @@ import {
   parseUpstream,
   validateConfig,
 } from "../dist-server/core.js";
+
+import { runCommand } from "../dist-server/process-manager.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -413,4 +415,36 @@ test("Localdeck の起動プロセスを呼び出し元とは別セッション�
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
   assert.equal((await isPortOpen("127.0.0.1", port)).online, true);
+});
+
+test("子コマンドは継承したNodeよりmise shimsを優先し、各アプリのcwdで解決する", async (t) => {
+  const temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "localdeck-mise-test-"));
+  t.after(() => rm(temporaryDirectory, { recursive: true, force: true }));
+  const dataDirectory = path.join(temporaryDirectory, "mise");
+  const shimsDirectory = path.join(dataDirectory, "shims");
+  const inheritedDirectory = path.join(temporaryDirectory, "inherited-bin");
+  await mkdir(shimsDirectory, { recursive: true });
+  await mkdir(inheritedDirectory);
+  const shim = path.join(shimsDirectory, "node");
+  const inheritedNode = path.join(inheritedDirectory, "node");
+  await writeFile(shim, "#!/bin/sh\n/bin/cat .runtime-version\n");
+  await writeFile(inheritedNode, "#!/bin/sh\necho inherited-version\n");
+  await chmod(shim, 0o755);
+  await chmod(inheritedNode, 0o755);
+  for (const version of ["24", "26"]) {
+    const directory = path.join(temporaryDirectory, `app-${version}`);
+    await mkdir(directory);
+    await writeFile(path.join(directory, ".runtime-version"), version);
+    const result = await runCommand(["node"], {
+      cwd: directory,
+      env: {
+        ...process.env,
+        MISE_DATA_DIR: dataDirectory,
+        MISE_SHIMS_DIR: "",
+        PATH: `${inheritedDirectory}:/usr/bin:/bin`,
+      },
+    });
+    assert.equal(result.code, 0);
+    assert.equal(result.output.trim(), version);
+  }
 });
