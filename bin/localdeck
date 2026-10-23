@@ -186,7 +186,7 @@ write_pid_file() {
 }
 
 build_dashboard() {
-  (cd "$project_root" && npm run build)
+  (cd "$project_root" && mise exec -- npm run build)
 }
 
 start_caddy() {
@@ -297,7 +297,7 @@ start_dashboard() {
   fi
 
   build_dashboard
-  node_bin=$(command -v node)
+  node_bin=$(cd "$project_root" && mise which node)
   printf '\n[%s] starting Localdeck\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" >>"$dashboard_log_file"
   if ! server_pid=$("$node_bin" "$dashboard_launcher_file" \
     "$server_file" "$project_root" "$dashboard_log_file"); then
@@ -527,7 +527,8 @@ serve_all() {
   start_caddy
   build_dashboard
   cd "$project_root"
-  node "$server_file"
+  node_bin=$(mise which node)
+  "$node_bin" "$server_file"
 }
 
 command=${1:-start}
